@@ -71,7 +71,7 @@ nginx 的 include 目录（`config.ini` 里的 `NGINX_CONF_DIR`）。成品目�
 |---|---|
 | 应用代码（项目根 `src/`） | `./pack.sh` → 拖 `server` → `sudo ./deploy.sh service` |
 | 部署脚本（`server/deploy.sh`、`server/roles/*/run.sh`、`compose.yaml`） | `./pack.sh --no-build` → 拖 `server` → 重启对应角色 |
-| nginx 配置（仓库根 `nginx/consul-demo.conf`） | 手动复制到 `~/nginx/conf.d/` → `sudo nginx -t && sudo nginx -s reload`（跟打包无关） |
+| nginx 配置（仓库根 `nginx/consul-demo.conf`） | 拖 `server` → `sudo ./deploy.sh gateway`（它写配置并自动 reload，跟打包无关） |
 | 服务器侧说明 | 直接改 `server/README.md` |
 
 `./pack.sh --no-build` 时如果连镜像包都没有，会直接报错，不会吐出半成品。

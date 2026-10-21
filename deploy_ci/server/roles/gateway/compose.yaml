@@ -1,5 +1,7 @@
-# 角色二：网关
-# 负责把外面的请求按「后端地址列表」转给各台业务机。
+# 角色二：网关侧的「后端地址表生成器」
+# 真正转发流量的是宿主机 nginx：匹配规则和 proxy_pass 在 consul-demo.conf 里，
+# 后端地址表就是本容器写出到 conf.d 的那个 backends.conf。
+# 这里只盯注册中心重写地址表，不接管任何请求；改完由 deploy.sh 触发 nginx reload。
 # 加机器、删机器都不用改这里——地址列表是自动生成的。
 name: consul-demo-gateway
 

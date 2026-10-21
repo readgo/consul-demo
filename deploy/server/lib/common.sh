@@ -67,7 +67,8 @@ export REGISTRY MY_IP APP_PORT SITE_PORT SERVICE_NAME
 #   1. 默认 <调用者家目录>/nginx/conf.d
 #   2. 若宿主机 nginx 没有 include 这个默认目录，改用 nginx 自己的 conf.d
 #
-# 判定过程只读 nginx 的配置文件，不修改它（红线：脚本不碰宿主机 nginx）。
+# 判定过程只读 nginx 的配置文件，不修改它
+# （红线：脚本不写 nginx.conf 和它自身的文件，只往 include 目录放自己的配置）。
 
 abspath() {
   if command -v realpath >/dev/null 2>&1; then
@@ -419,4 +420,106 @@ ensure_nginx_files() {
       say "    后端地址表  已生成       $dir/backends.conf（取自注册中心）"
     fi
   fi
+}
+
+# ---------- 让 nginx 真正生效 ----------
+# 边界（2026-10-21 明确）：不动 nginx.conf 和它本身的文件，但允许把生成的配置
+# 放进它的 include 目录并让它生效。所以这里会：先 nginx -t，通过后——
+# 在跑就 reload，没在跑就启动。只用 nginx 自己的命令，不写 /etc/nginx/**，
+# 不装 systemd 单元。
+#
+# 为什么要有「没跑就启动」这一支：nginx -t 是纯语法检查，永远能通过；
+# 但 nginx -s reload 需要读 pid 文件，没在跑时报
+#   invalid PID number "" in "/run/nginx.pid"
+# 这个错看起来像配置问题，其实是服务根本没启动。
+
+nginx_pid_file() {
+  local p
+  p="$(nginx -V 2>&1 | tr ' ' '\n' | sed -n 's/^--pid-path=//p' | head -1)"
+  [ -n "$p" ] || p="/run/nginx.pid"
+  printf '%s\n' "$p"
+}
+
+# 只有 pid 文件有效、且那个进程还活着，才算 nginx 在跑
+nginx_master_pid() {
+  local f pid
+  f="$(nginx_pid_file)"
+  [ -r "$f" ] || return 1
+  pid="$(tr -cd '0-9' < "$f" 2>/dev/null)"
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  printf '%s\n' "$pid"
+}
+
+nginx_running() { nginx_master_pid >/dev/null 2>&1; }
+
+# nginx -t 通过才动它；不通过就保持原样并打印原因，绝不把线上打挂
+nginx_apply() {
+  local out pid
+
+  if ! nginx_installed; then
+    say "    nginx 未安装，跳过（配置已写到 $NGINX_CONF_DIR，装上后重跑本命令即可）"
+    return 0
+  fi
+
+  if ! out="$(nginx -t 2>&1)"; then
+    say "    [失败] nginx -t 不通过，没有 reload（线上保持原样）："
+    printf '%s\n' "$out" | sed 's/^/      /'
+    return 1
+  fi
+
+  if nginx_running; then
+    pid="$(nginx_master_pid)"
+    if out="$(nginx -s reload 2>&1)"; then
+      say "    nginx 已 reload（master pid $pid）"
+    else
+      say "    [失败] nginx -s reload："
+      printf '%s\n' "$out" | sed 's/^/      /'
+      return 1
+    fi
+    return 0
+  fi
+
+  say "    nginx 当前没有运行，启动它"
+  if command -v systemctl >/dev/null 2>&1 \
+     && systemctl list-unit-files 2>/dev/null | grep -q '^nginx\.service'; then
+    systemctl start nginx >/dev/null 2>&1 || true
+  else
+    nginx >/dev/null 2>&1 || true
+  fi
+
+  if nginx_running; then
+    say "    nginx 已启动（master pid $(nginx_master_pid)）"
+    return 0
+  fi
+
+  say "    [失败] nginx 没起来。配置已经就位，修好后重跑本命令即可。"
+  return 1
+}
+
+# 等某个后端地址出现在地址表里（generator 有 1-2 秒延迟）
+wait_backend_has() {
+  local f="$1" target="$2" i
+  for i in $(seq 1 20); do
+    grep -qF "server $target " "$f" 2>/dev/null && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+# 业务机上执行时：这台机器同时也是网关（装了 nginx 且地址表就在本机）才动手，
+# 纯业务机直接跳过。单机演示里就是靠它做到「加实例后 nginx 自己认到」。
+apply_gateway_if_local() {
+  local target="$1"
+  nginx_installed || return 0
+  [ -f "$NGINX_CONF_DIR/backends.conf" ] || return 0
+
+  say ""
+  say "    本机同时也是网关，让 nginx 认到新地址"
+  if wait_backend_has "$NGINX_CONF_DIR/backends.conf" "$target"; then
+    say "    地址表已包含 $target"
+  else
+    say "    [注意] 10 秒内地址表没出现 $target，仍然尝试 reload"
+  fi
+  nginx_apply || true
 }

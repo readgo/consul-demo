@@ -3,7 +3,7 @@
 #  部署入口（CI 版）。镜像由 CI 构建好推到 Docker Hub，服务器只负责拉。
 #
 #    sudo ./deploy.sh center     注册中心   一台机器装一次，之后永远不用管
-#    sudo ./deploy.sh gateway    网关       负责接流量的那台机器
+#    sudo ./deploy.sh gateway    网关机     装 nginx 的那台（含地址表生成器）
 #    sudo ./deploy.sh service    业务应用   每台业务机各装一次
 #
 #    sudo ./deploy.sh all        三块装在同一台（单机演示用）
@@ -18,8 +18,10 @@
 #  加机器：新机器拷一份目录 -> 改 config.ini 里的 REGISTRY -> sudo ./deploy.sh service
 #          老机器、注册中心、网关都不用改。
 #
-#  本脚本不碰宿主机 nginx 的任何配置：不写 /etc/nginx/**、不 reload、
-#  不装任何 nginx 相关的系统服务。nginx 那边只有两件事，都由人手动做。
+#  nginx 边界：不改它的默认配置文件（/etc/nginx/nginx.conf 和它自身的文件），
+#  不装 nginx 相关的系统服务；只把生成好的配置放进它 include 的 conf.d 目录，
+#  然后调 nginx 自己的命令让它生效——在跑就 reload，没在跑就启动。
+#  唯一必须人手动做的一次：在那份 nginx.conf 的 http {} 里加一行 include。
 # ============================================================
 set -euo pipefail
 
@@ -27,7 +29,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$ROOT/lib/common.sh"
 
 usage() {
-  awk 'NR>2 && /^# ====/ {exit} NR>2 && /^#/ {sub(/^# ?/, ""); print}' "$0"
+  # 用绝对路径而不是 $0：common.sh 已经 cd 到部署目录根，
+  # 从别处用 `bash deploy_ci/server/deploy.sh help` 这类相对路径调用时，
+  # $0 会解析不到（awk: cannot open file）。
+  awk 'NR>2 && /^# ====/ {exit} NR>2 && /^#/ {sub(/^# ?/, ""); print}' "$ROOT/deploy.sh"
   exit "${1:-0}"
 }
 

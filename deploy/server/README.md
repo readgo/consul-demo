@@ -53,7 +53,7 @@ deploy-consul-demo/
 | 命令 | 装什么 | 在哪台机器 | 装几次 |
 |---|---|---|---|
 | `sudo ./deploy.sh center` | 注册中心 | 挑一台固定的 | 一次，以后不用管 |
-| `sudo ./deploy.sh gateway` | 网关 | 接流量的那台 | 一次 |
+| `sudo ./deploy.sh gateway` | 地址表生成器（转发由该机的 nginx 做） | 装 nginx 的那台 | 一次 |
 | `sudo ./deploy.sh service` | 业务应用 | 每台业务机 | 每台一次 |
 | `sudo ./deploy.sh all` | 三块装同一台 | 单机演示 | 一次 |
 | `./deploy.sh status` | 看当前机器装了什么 | 任意 | 随时 |
@@ -129,15 +129,13 @@ SERVICE_NAME=consul-demo
 
 ```bash
 sudo ./deploy.sh all
-# 它会判定 nginx 配置目录，把 backends.conf 写进去，缺 consul-demo.conf 也一并生成
+# 它会判定 nginx 配置目录，把 backends.conf 写进去，缺 consul-demo.conf 也一并生成，
+# 最后调用 nginx 自己的命令 reload（nginx 没在跑就启动），不需要你敲 nginx。
 
-# nginx 那边（手动，一次性；脚本不碰宿主机 nginx）
-#   只有一件事：如果 deploy.sh gateway 打印了「待办」，说明这个目录还没被 include，
-#   到 /etc/nginx/nginx.conf 的 http {} 里加一行：
-#        include /home/jing/nginx/conf.d/*.conf;
-#   没打印「待办」就说明已经 include 过了，什么都不用做。
-
-sudo nginx -t && sudo nginx -s reload
+# 唯一可能要手动的一件事（只做一次）：如果 deploy.sh gateway 打印了「待办」，
+# 说明这个目录还没被 include，到 /etc/nginx/nginx.conf 的 http {} 里加一行：
+#     include /home/jing/nginx/conf.d/*.conf;
+# 没打印「待办」就说明已经 include 过了，什么都不用做。
 
 # 验证
 curl -s "http://$(hostname -I | awk '{print $1}'):8088/api/demo/v1/test?name=hello"
@@ -145,8 +143,8 @@ curl -s "http://$(hostname -I | awk '{print $1}'):8088/api/demo/v1/test?name=hel
 
 最后一条返回 `hello:hello` 就成了。
 
-> **顺序**：先跑 `deploy.sh`（它会把后端地址列表生成出来），再 reload nginx。
-> 反过来做，nginx 会因为找不到后端而报错。
+> **顺序**：`deploy.sh` 内部已经处理好了「先有地址表、再 reload」这个顺序，
+> 不用你操心。
 
 ---
 
@@ -157,11 +155,8 @@ curl -s "http://$(hostname -I | awk '{print $1}'):8088/api/demo/v1/test?name=hel
 ```bash
 sudo ./deploy.sh center
 sudo ./deploy.sh gateway
-
-# nginx 那边（手动，一次性）
-cp <仓库根>/nginx/consul-demo.conf ../nginx/conf.d/
-# /etc/nginx/nginx.conf 的 http {} 里要有：include /home/jing/nginx/conf.d/*.conf;
-sudo nginx -t && sudo nginx -s reload
+# 网关这一步会自动 reload nginx（没在跑就启动），不需要手敲 nginx 命令。
+# 站点配置缺了会自动生成，不用再 cp 仓库根那份。
 ```
 
 **第二台**（业务机）：
@@ -172,11 +167,11 @@ sed -i 's|^REGISTRY=.*|REGISTRY=http://第一台的内网IP:8500|' config.ini
 sudo ./deploy.sh service
 ```
 
-回第一台 reload 一次 nginx，流量就分到两台了。
+回第一台跑一次 `sudo ./deploy.sh gateway`，地址表重新拉一遍并自动 reload，流量就分到两台了。
 
 **第一台的配置文件一个字都没改。**
 
-加第三、第四台同理：拷目录 → 改 `config.ini` 那一行 → `sudo ./deploy.sh service` → 网关 reload。
+加第三、第四台同理：拷目录 → 改 `config.ini` 那一行 → `sudo ./deploy.sh service` → 回网关机 `sudo ./deploy.sh gateway`。
 
 ---
 
@@ -211,7 +206,7 @@ sudo ./deploy.sh service
 | 报「连不上注册中心」 | 3 秒就报，说明地址或端口不通。对照 `config.ini` 里的 `REGISTRY`；远端要放通 8500 |
 | 报「还没准备好」 | 能连上但没选出主，等 30 秒再执行 |
 | 报到成功，但网关里是 `127.0.0.1` | `config.ini` 里 `MY_IP` 填错了，或探测到虚拟网卡。手工填真实内网地址 |
-| 列表变了但访问没变化 | 忘了 reload：`sudo nginx -s reload` |
+| 列表变了但访问没变化 | 脚本已经自动 reload 过；还不对就看上一步 `nginx_apply` 的报错。手工补一次：`sudo nginx -t && sudo nginx -s reload` |
 | 访问 502 | 先看 `backends.conf` 里是不是只有 `127.0.0.1:1 down` 占位（占位只是为了让 `-t` 过，照样 502）；有真实地址就直连试 `curl <地址>/healthz` |
 | 注册报 `permission denied` | `sudo chmod 777 roles/center/data/center` |
 
@@ -219,14 +214,14 @@ sudo ./deploy.sh service
 
 ## 关于 nginx
 
-**脚本负责「目录判定 + 缺文件补齐 + 写 backends.conf」，nginx 的 include 和 reload 由人负责。**
+**边界：不动 `nginx.conf` 和它本身的任何文件，只往它的 include 目录里放生成的配置，再让它生效。**
 
 | 谁 | 做什么 |
 |---|---|
 | `deploy.sh gateway` | 判定目录；缺 `consul-demo.conf` 就生成；缺 `backends.conf` 就补一份（查注册中心，查不到写 down 占位） |
 | `deploy.sh gateway` | 起 generator，之后 `backends.conf` 由它持续重写 |
+| `deploy.sh gateway` / `deploy.sh service` | **先 `nginx -t`，通过后 reload；nginx 没在跑就启动它**（`lib/common.sh` 的 `nginx_apply`） |
 | 你，手动一次（仅当脚本提示「待办」） | 在 `/etc/nginx/nginx.conf` 的 `http {}` 里加 `include <那个目录>/*.conf;` |
-| 你，后端有变化后 | `sudo nginx -t && sudo nginx -s reload` |
 
 默认算出来的目录就是这个结构，开箱可用（`sudo` 执行时按真实用户家目录算）：
 
@@ -241,5 +236,7 @@ sudo ./deploy.sh service
 仓库根 `nginx/consul-demo.conf` 就是默认值样品，`cp` 过去即可；只要目标文件已存在，
 脚本不会再覆盖。
 
-脚本**不改**宿主机的 nginx 配置，也不执行 `nginx -t` / `nginx -s reload`——
-这是刻意的：容器里的程序给宿主机 nginx 发重启信号会被系统拦住，硬要做就得往宿主机装常驻服务，那等于改了系统配置。
+**为什么会有「启动了没 reload」这种坑**：`nginx -t` 是纯语法检查，永远能通过；
+`nginx -s reload` 需要读 pid 文件，nginx 没在跑时报
+`invalid PID number "" in "/run/nginx.pid"`——看着像配置问题，其实是服务根本没启动。
+`nginx_apply` 先判断 pid 文件里那个进程是否还活着，没在跑就直接启动，避免这个误判。

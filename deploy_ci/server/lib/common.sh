@@ -547,29 +547,6 @@ nginx_apply() {
   return 1
 }
 
-# 等某个后端地址出现在地址表里（generator 有 1-2 秒延迟）
-wait_backend_has() {
-  local f="$1" target="$2" i
-  for i in $(seq 1 20); do
-    grep -qF "server $target " "$f" 2>/dev/null && return 0
-    sleep 0.5
-  done
-  return 1
-}
-
-# 业务机上执行时：这台机器同时也是网关（装了 nginx 且地址表就在本机）才动手，
-# 纯业务机直接跳过。单机演示里就是靠它做到「加实例后 nginx 自己认到」。
-apply_gateway_if_local() {
-  local target="$1"
-  nginx_installed || return 0
-  [ -f "$NGINX_CONF_DIR/backends.conf" ] || return 0
-
-  say ""
-  say "    本机同时也是网关，让 nginx 认到新地址"
-  if wait_backend_has "$NGINX_CONF_DIR/backends.conf" "$target"; then
-    say "    地址表已包含 $target"
-  else
-    say "    [注意] 10 秒内地址表没出现 $target，仍然尝试 reload"
-  fi
-  nginx_apply || true
-}
+# 注：这里不再有「业务机上顺便 reload nginx」的函数。
+# 节点增删的生效责任只有一个：网关那台的 generator 写完地址表就自己发 HUP
+# （roles/gateway/reload-nginx.sh）。业务机不需要知道 nginx 的存在。

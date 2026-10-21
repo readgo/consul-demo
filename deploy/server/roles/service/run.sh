@@ -67,26 +67,23 @@ else
   say "    [注意] 没等到报到，看日志：docker logs $INSTANCE_ID --tail 40"
 fi
 
-# 这台机器同时也是网关时（单机演示就是），把新地址等进地址表并让 nginx 生效。
-# 纯业务机没有 nginx，函数内部直接返回，不会打印任何东西。
-apply_gateway_if_local "$MY_IP:$PORT"
-
+# 不在这里碰 nginx：地址表由网关那台的 generator 重写并自己发 HUP，
+# 本机就算装了 nginx 也不该由业务部署脚本去 reload（职责分开）。
 cat <<EOF
 
-这台机器装好了。网关那边会自动发现它，不需要来这里改任何配置。
+这台机器装好了。网关那边会在 1~2 秒内自动发现它，不需要来这里改任何配置。
 
   本机直连验证    curl -s 'http://$MY_IP:$PORT/healthz'
   本机接口验证    curl -s 'http://$MY_IP:$PORT/v1/test?name=hello'
 
-nginx 已经自动 reload（本机是网关时），不需要你手动敲 nginx 命令。
-如果网关在另一台机器上：去那台执行一次 ./deploy.sh gateway，它会重新拉
-地址表并 reload（同样不需要手敲 nginx）。
+网关在别的机器上也不用管：那台的 generator 会重写地址表，然后自己给 nginx
+发 HUP 平滑重载——不需要去网关敲任何命令。
 
 下线这台机器：
 
   docker rm -f $INSTANCE_ID
 
-（下线后注册中心会在 1 分钟内清掉它；网关在下次 ./deploy.sh gateway 时
- 重新拉一次地址表即可，期间 nginx 靠 max_fails 自动绕开这个死地址。）
+（下线后注册中心 1 分钟内清掉它，地址表随之自动重写并重载。清掉之前那几十秒里
+ nginx 靠 max_fails=2 fail_timeout=2s 自动绕开这个死地址。）
 
 EOF

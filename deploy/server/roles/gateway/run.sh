@@ -7,6 +7,7 @@
 # include 目录。那个目录不用你指定，脚本自己判定（规则见下）。
 # 不装 nginx 本身，也不改 nginx.conf；缺的站点配置会生成一份到 include 目录，
 # 然后调用 nginx 自己的命令 reload（没在跑就启动），全程不需要你敲 nginx。
+# 之后地址表一变（加机器、下线机器），容器自己发 HUP 让 nginx 重载，同样不用你管。
 #
 # 目录判定（config.ini 的 NGINX_CONF_DIR 留空时）：
 #   1. 默认用 <当前用户家目录>/nginx/conf.d
@@ -20,6 +21,13 @@ need_root gateway
 need_docker
 
 cd "$ROOT/roles/gateway"
+
+# 地址表变化后靠这个脚本让 nginx 重载。缺了它，节点增删就不会自动生效。
+# 打包清单里也校验它，这里再挡一道：文件没拷全、执行位丢了都能立刻发现。
+[ -x ./reload-nginx.sh ] || die "缺少 roles/gateway/reload-nginx.sh，或它没有执行位。
+
+    没有它，generator 写完地址表后没人通知 nginx，加节点/删节点都不会自动生效。
+    处理：重新拷一份完整的 deploy/server 目录；或 chmod +x roles/gateway/reload-nginx.sh"
 
 step "1/4 检查能不能连上注册中心"
 registry_reachable || die "连不上注册中心 $REGISTRY（地址或端口不通）。
@@ -42,6 +50,23 @@ fi
 
 step "3/4 启动地址列表生成器"
 export REGISTRY_HOSTPORT
+
+# generator 写完地址表会自己发 HUP 让 nginx 重载，得先告诉它去哪读 pid。
+# 宿主 /run 以只读方式挂进容器（/hostrun），所以把 pid 路径换算成容器内路径。
+NGINX_PID_SRC="$(nginx_pid_file)"
+case "$NGINX_PID_SRC" in
+  /run/*)     NGINX_PIDFILE="/hostrun/${NGINX_PID_SRC#/run/}" ;;
+  /var/run/*) NGINX_PIDFILE="/hostrun/${NGINX_PID_SRC#/var/run/}" ;;
+  *)          NGINX_PIDFILE="" ;;
+esac
+if [ -n "$NGINX_PIDFILE" ]; then
+  say "    nginx pid   $NGINX_PID_SRC（容器内读 $NGINX_PIDFILE）"
+  export NGINX_PIDFILE
+else
+  say "    [注意] nginx 的 pid 文件在 $NGINX_PID_SRC，不在 /run 下，挂不进容器。"
+  say "           地址表仍会自动更新，但改完需要你自己 reload。"
+fi
+
 docker compose up -d --quiet-pull
 
 if wait_backend_file "$NGINX_CONF_DIR/backends.conf"; then
@@ -71,13 +96,16 @@ fi
 
 cat <<EOF
 
-网关这边装好了，nginx 已经自动生效。
+网关这边装好了，nginx 已经生效。
 
   不再需要你手动敲 nginx -t / nginx -s reload：
   本机执行 ./deploy.sh gateway 或 ./deploy.sh service 时都会自动 reload。
 
-  别的机器加进来/下线后，回到网关这台执行一次 ./deploy.sh gateway 就会
-  重新拉地址表并 reload（纯业务机上没有 nginx，脚本会自动跳过 reload）。
+  别的机器加进来或下线：generator 会在 1~2 秒内重写地址表，然后自己给 nginx
+  发 HUP 平滑重载。不需要回到这台执行任何命令。
+
+  前提是 nginx 在跑（首次由本命令启动）。如果它被停掉了，HUP 发不过去
+  （容器日志会打 [reload] 宿主 nginx 没在跑），重新执行一次本命令即可。
 
 验证：
 

@@ -1,8 +1,8 @@
 # 角色二：网关侧的「后端地址表生成器」
 # 真正转发流量的是宿主机 nginx：匹配规则和 proxy_pass 在 consul-demo.conf 里，
 # 后端地址表就是本容器写出到 conf.d 的那个 backends.conf。
-# 这里只盯注册中心重写地址表，不接管任何请求；改完由 deploy.sh 触发 nginx reload。
-# 加机器、删机器都不用改这里——地址列表是自动生成的。
+# 这里只盯注册中心重写地址表，不接管任何请求；写完自己发 HUP 让 nginx 重载，
+# 所以加机器、删机器都是秒级自动生效，不需要回网关敲任何命令。
 name: consul-demo-gateway
 
 services:
@@ -12,16 +12,29 @@ services:
     restart: unless-stopped
     network_mode: host
     user: root                # 镜像默认用户写不了卷目录，必须给 root
+    # 共享宿主的 pid 命名空间：只为了看得见宿主的 nginx master，
+    # 除了发一个 HUP 之外不做别的。
+    pid: host
+    # 发信号要这两样：默认的 seccomp/apparmor 会拦 kill。
+    # 实测 pid: host + CAP_KILL + apparmor=unconfined 三者缺一不可。
+    cap_add:
+      - KILL
+    security_opt:
+      - apparmor=unconfined
     command:
       # 从注册中心拉服务列表
       - "-consul-addr=${REGISTRY_HOSTPORT}"
-      # 模板 -> 生成 nginx 用的后端地址列表；只写文件，不碰 nginx 进程
-      # 输出位置就是 nginx 的 include 目录（config.ini 里的 NGINX_CONF_DIR）
-      - "-template=./backends.ctmpl:/conf/backends.conf"
+      # 冒号分隔三段：模板 : 输出 : 写完要执行的命令。
+      # 命令必须是容器内绝对路径且不能含冒号（会被当分隔符）。
+      - "-template=./backends.ctmpl:/conf/backends.conf:/work/reload-nginx.sh"
     environment:
       # 模板里用它决定 upstream 叫什么，必须和 nginx 的 proxy_pass 一致
       - SERVICE_NAME=${SERVICE_NAME}
+      # reload-nginx.sh 从哪读 nginx 的 pid（容器内路径，由 run.sh 按 nginx -V 算出来）
+      - NGINX_PIDFILE=${NGINX_PIDFILE:-/hostrun/nginx.pid}
     volumes:
       - ./:/work
       - ${NGINX_CONF_DIR}:/conf
+      # 宿主 /run 只读挂进来：nginx 的 pid 文件在里面
+      - /run:/hostrun:ro
     working_dir: /work

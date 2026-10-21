@@ -167,11 +167,12 @@ sed -i 's|^REGISTRY=.*|REGISTRY=http://第一台的内网IP:8500|' config.ini
 sudo ./deploy.sh service
 ```
 
-回第一台跑一次 `sudo ./deploy.sh gateway`，地址表重新拉一遍并自动 reload，流量就分到两台了。
+不用回第一台做任何事：新实例报到后，第一台的 generator 会在 1~2 秒内重写地址表，
+然后自己给 nginx 发 HUP 平滑重载，流量立刻分到两台。
 
 **第一台的配置文件一个字都没改。**
 
-加第三、第四台同理：拷目录 → 改 `config.ini` 那一行 → `sudo ./deploy.sh service` → 回网关机 `sudo ./deploy.sh gateway`。
+加第三、第四台同理：拷目录 → 改 `config.ini` 那一行 → `sudo ./deploy.sh service`。**到这一步就结束了**，网关那边全自动。
 
 ---
 
@@ -179,8 +180,8 @@ sudo ./deploy.sh service
 
 | 动作 | 要改配置吗 | 要做的事 |
 |---|---|---|
-| 加一台业务机 | 不用 | 新机器上 `sudo ./deploy.sh service`，然后网关 reload 一次 |
-| 删一台业务机 | 不用 | 那台执行 `docker rm -f <容器名>`，几秒后自动从列表消失 |
+| 加一台业务机 | 不用 | 新机器上 `sudo ./deploy.sh service` 就够了，1~2 秒后网关自动认到 |
+| 删一台业务机 | 不用 | 那台执行 `docker rm -f <容器名>`，1~2 秒后自动从列表消失并重载 |
 | 同机再加一个实例 | 不用 | `sudo ./deploy.sh service 2`，端口自动变 3021 |
 
 ---
@@ -194,7 +195,7 @@ sudo ./deploy.sh service
 | 3 | `curl -s localhost:8500/v1/catalog/service/consul-demo` | 地址是内网 IP，**不是 127.0.0.1** |
 | 4 | `cat $NGINX_CONF_DIR/backends.conf`（`deploy.sh gateway` 会打印实际路径） | 每台业务机一行 `server` |
 | 5 | `curl -s "http://<本机IP>:8088/api/demo/v1/test?name=x"` | `hello:x` |
-| 6 | 加一台业务机后再看 `backends.conf` | 自动多一行 |
+| 6 | 加一台业务机后看 `backends.conf` 和 `docker logs consul-demo-generator` | 自动多一行，日志里出现 `[reload] 已通知 nginx 平滑重载` |
 
 ---
 
@@ -206,7 +207,7 @@ sudo ./deploy.sh service
 | 报「连不上注册中心」 | 3 秒就报，说明地址或端口不通。对照 `config.ini` 里的 `REGISTRY`；远端要放通 8500 |
 | 报「还没准备好」 | 能连上但没选出主，等 30 秒再执行 |
 | 报到成功，但网关里是 `127.0.0.1` | `config.ini` 里 `MY_IP` 填错了，或探测到虚拟网卡。手工填真实内网地址 |
-| 列表变了但访问没变化 | 脚本已经自动 reload 过；还不对就看上一步 `nginx_apply` 的报错。手工补一次：`sudo nginx -t && sudo nginx -s reload` |
+| 列表变了但访问没变化 | 看 `docker logs consul-demo-generator` 有没有 `[reload]` 那行：**没有** → 宿主 nginx 没在跑，执行一次 `./deploy.sh gateway`；**有** → 信号已发到，是配置本身有问题，手工 `sudo nginx -t` 看报错（多半是 upstream 名和 `proxy_pass` 不一致，这种情况 `-t` 不报错但请求 502） |
 | 访问 502 | 先看 `backends.conf` 里是不是只有 `127.0.0.1:1 down` 占位（占位只是为了让 `-t` 过，照样 502）；有真实地址就直连试 `curl <地址>/healthz` |
 | 注册报 `permission denied` | `sudo chmod 777 roles/center/data/center` |
 
@@ -219,8 +220,9 @@ sudo ./deploy.sh service
 | 谁 | 做什么 |
 |---|---|
 | `deploy.sh gateway` | 判定目录；缺 `consul-demo.conf` 就生成；缺 `backends.conf` 就补一份（查注册中心，查不到写 down 占位） |
-| `deploy.sh gateway` | 起 generator，之后 `backends.conf` 由它持续重写 |
-| `deploy.sh gateway` / `deploy.sh service` | **先 `nginx -t`，通过后 reload；nginx 没在跑就启动它**（`lib/common.sh` 的 `nginx_apply`） |
+| `deploy.sh gateway` | 起 generator（常驻），之后 `backends.conf` 由它持续重写 |
+| `deploy.sh gateway` | **先 `nginx -t`，通过后 reload；nginx 没在跑就启动它**（`lib/common.sh` 的 `nginx_apply`） |
+| generator 容器（常驻） | **地址表一变就自己给 nginx 发 HUP**（`roles/gateway/reload-nginx.sh`），平滑重载——加节点、删节点都不用碰人 |
 | 你，手动一次（仅当脚本提示「待办」） | 在 `/etc/nginx/nginx.conf` 的 `http {}` 里加 `include <那个目录>/*.conf;` |
 
 默认算出来的目录就是这个结构，开箱可用（`sudo` 执行时按真实用户家目录算）：
@@ -240,3 +242,8 @@ sudo ./deploy.sh service
 `nginx -s reload` 需要读 pid 文件，nginx 没在跑时报
 `invalid PID number "" in "/run/nginx.pid"`——看着像配置问题，其实是服务根本没启动。
 `nginx_apply` 先判断 pid 文件里那个进程是否还活着，没在跑就直接启动，避免这个误判。
+
+**容器凭什么叫得动宿主 nginx**：`generator` 用 `pid: host` 共享宿主的 pid 命名空间，
+加 `cap_add: [KILL]` 和 `security_opt: [apparmor=unconfined]`，再把宿主 `/run` 只读挂到
+`/hostrun` 读 pid 文件。三个条件缺一个，容器日志里就会出现
+`[reload] 给 nginx 发 HUP 失败（pid xxx）`——这是权限问题，不是地址表问题。

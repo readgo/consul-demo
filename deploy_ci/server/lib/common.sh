@@ -31,7 +31,7 @@ MY_IP=
 APP_PORT=3020
 SITE_PORT=8088
 SERVICE_NAME=consul-demo
-IMAGE_REPO=readgo/consul-demo
+IMAGE_REPO=wttcvs/consul-demo
 IMAGE_TAG=latest
 EOF
     chmod 644 "$CONF"
@@ -63,7 +63,7 @@ SERVICE_NAME="${SERVICE_NAME:-consul-demo}"
 # ---------- 镜像来自哪 ----------
 # 与 deploy/ 那套的区别只有这一处：那边是本地打 tar 包再 docker load，
 # 这边是直接 docker pull 一个已经构建好的镜像。
-IMAGE_REPO="${IMAGE_REPO:-readgo/consul-demo}"
+IMAGE_REPO="${IMAGE_REPO:-wttcvs/consul-demo}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 IMAGE_REF="${IMAGE_REPO}:${IMAGE_TAG}"
 

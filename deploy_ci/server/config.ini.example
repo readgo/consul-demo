@@ -11,11 +11,13 @@
 
 # ---------- 镜像从哪拉 ----------
 #  应用镜像由 CI 构建好推到 Docker Hub，服务器只负责拉，不在本地编译。
-#  IMAGE_REPO 必须和 GitHub 仓库里 DOCKER_USERNAME 那个账号一致。
+#  IMAGE_REPO 的账号部分必须与 .github/workflows/release.yml 里的
+#  DOCKERHUB_NAMESPACE 一致（也就是密钥 DOCKER_USERNAME 那个账号），
+#  否则镜像推到一个账号、这边去另一个账号拉，一定报 not found。
 #
 #  正式部署请钉具体版本，不要长期用 latest —— 出问题时才知道线上是哪个版本。
 #  每次发布后 release.sh 会打印该填什么，形如 v20261021-104730。
-IMAGE_REPO=readgo/consul-demo
+IMAGE_REPO=wttcvs/consul-demo
 IMAGE_TAG=latest
 
 # ---------- 私有仓库才要填 ----------

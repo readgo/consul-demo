@@ -72,8 +72,12 @@ case "$SLUG" in
          可以手工指定镜像仓库：IMAGE_REPO=<账号/仓库> $0 ..." ;;
 esac
 
-# 镜像仓库默认与代码仓库同名（Docker Hub 用户名一般也是这个）
-IMAGE_REPO="${IMAGE_REPO:-$SLUG}"
+# 镜像推到哪个 Docker Hub 账号下。
+# 必须与 .github/workflows/release.yml 里的 DOCKERHUB_NAMESPACE 一致
+# （那里还会拿它跟仓库密钥 DOCKER_USERNAME 对比，不一致 CI 直接失败）。
+# 不能拿 GitHub 仓库的 owner 当默认值：Docker Hub 账号和 GitHub 账号经常不是同一个。
+DOCKERHUB_NAMESPACE="${DOCKERHUB_NAMESPACE:-wttcvs}"
+IMAGE_REPO="${IMAGE_REPO:-$DOCKERHUB_NAMESPACE/${SLUG##*/}}"
 ACTIONS_URL="https://github.com/$SLUG/actions/workflows/release.yml"
 
 # 工作区有未提交内容 -> 那些改动不会进镜像。直接停，不要发一个残版本。

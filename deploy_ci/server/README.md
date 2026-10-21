@@ -72,7 +72,7 @@ deploy-consul-demo/
 
 ```bash
 # 镜像从哪拉。IMAGE_REPO 必须和发布时用的 Docker Hub 账号一致
-IMAGE_REPO=readgo/consul-demo
+IMAGE_REPO=wttcvs/consul-demo
 IMAGE_TAG=v20261021-104730
 
 # 私有仓库才填，公开仓库留空。填了 token 记得 chmod 600 config.ini
@@ -188,7 +188,7 @@ sudo ./deploy.sh service
 | # | 命令 | 期望 |
 |---|---|---|
 | 1 | `./deploy.sh status` | 三块分别显示 Up 或「（本机没装）」，业务应用下面多一行 `镜像` |
-| 2 | `./deploy.sh status` 最后一行 | `config.ini 里配的是 readgo/consul-demo:<tag>`，与容器实际镜像一致 |
+| 2 | `./deploy.sh status` 最后一行 | `config.ini 里配的是 wttcvs/consul-demo:<tag>`，与容器实际镜像一致 |
 | 3 | `curl -s localhost:8500/v1/status/leader` | `"<本机内网IP>:8300"` |
 | 4 | `curl -s localhost:8500/v1/catalog/service/consul-demo` | 地址是内网 IP，**不是 127.0.0.1** |
 | 5 | `cat roles/gateway/conf.d/backends.conf` | 每台业务机一行 `server` |

@@ -84,6 +84,7 @@ CI 从 tag 指向的提交构建，工作区未提交的改动不会进镜像是
 |---|---|
 | 服务器能访问 | Docker Hub（`docker pull hello-world` 能过） |
 | GitHub 仓库密钥 | `DOCKER_USERNAME`、`DOCKER_TOKEN` |
+| 镜像命名空间 | `.github/workflows/release.yml` 的 `DOCKERHUB_NAMESPACE`，须与 `DOCKER_USERNAME` 一致 |
 | 工作流位置 | `.github/workflows/release.yml` |
 | 服务器已装 | docker + compose 插件、nginx（网关那台） |
 

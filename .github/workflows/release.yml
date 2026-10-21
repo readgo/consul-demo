@@ -29,8 +29,11 @@ env:
   # 镜像推到哪个 Docker Hub 账号下。必须与密钥 DOCKER_USERNAME 的值完全一致，
   # 下面「检查密钥」那一步会核对，不一致直接失败。
   #
-  # 为什么单独写一份：镜像名如果直接用 ${{ secrets.DOCKER_USERNAME }} 拼，
-  # 日志里会被打码成 ***/consul-demo，排查时看不出到底推到了哪个账号。
+  # 为什么单独声明一份：CI、release.sh、config.ini 三处都要知道这个账号，
+  # 只从密钥里取的话脚本读不到（密钥不可读），三处容易各写各的。
+  #
+  # 注意：日志里这个值仍然会显示成 ***，因为 GitHub 是按「密钥的值」打码的，
+  # 不是按 ${{ secrets.X }} 这种写法打码 —— 只要它等于密钥值就必然被打码。
   DOCKERHUB_NAMESPACE: wttcvs
   IMAGE_NAME: consul-demo
 

@@ -14,7 +14,12 @@ services:
       # 从注册中心拉服务列表
       - "-consul-addr=${REGISTRY_HOSTPORT}"
       # 模板 -> 生成 nginx 用的后端地址列表；只写文件，不碰 nginx 进程
-      - "-template=./backends.ctmpl:./conf.d/backends.conf"
+      # 输出位置就是 nginx 的 include 目录（config.ini 里的 NGINX_CONF_DIR）
+      - "-template=./backends.ctmpl:/conf/backends.conf"
+    environment:
+      # 模板里用它决定 upstream 叫什么，必须和 nginx 的 proxy_pass 一致
+      - SERVICE_NAME=${SERVICE_NAME}
     volumes:
       - ./:/work
+      - ${NGINX_CONF_DIR}:/conf
     working_dir: /work

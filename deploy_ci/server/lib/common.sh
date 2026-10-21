@@ -30,6 +30,7 @@ REGISTRY=http://127.0.0.1:8500
 MY_IP=
 APP_PORT=3020
 SITE_PORT=8088
+NGINX_CONF_DIR=
 SERVICE_NAME=consul-demo
 IMAGE_REPO=wttcvs/consul-demo
 IMAGE_TAG=latest
@@ -59,6 +60,9 @@ MY_IP="${MY_IP:-}"
 APP_PORT="${APP_PORT:-3020}"
 SITE_PORT="${SITE_PORT:-8088}"
 SERVICE_NAME="${SERVICE_NAME:-consul-demo}"
+# 这几个要给 docker compose 做变量替换，必须显式导出：
+# config.ini 里没写某一项时，上面的兜底赋值不会自动带上 export 属性。
+export REGISTRY MY_IP APP_PORT SITE_PORT SERVICE_NAME
 
 # ---------- 镜像来自哪 ----------
 # 与 deploy/ 那套的区别只有这一处：那边是本地打 tar 包再 docker load，
@@ -70,6 +74,125 @@ IMAGE_REF="${IMAGE_REPO}:${IMAGE_TAG}"
 # 私有仓库才需要。公开仓库留空即可，不要往 config.ini 里写 token。
 DOCKER_USERNAME="${DOCKER_USERNAME:-}"
 DOCKER_TOKEN="${DOCKER_TOKEN:-}"
+
+# ---------- nginx 配置目录：自动判定 ----------
+# config.ini 里填了就用填的；留空则按两条规则推断：
+#   1. 默认 <调用者家目录>/nginx/conf.d
+#   2. 若宿主机 nginx 没有 include 这个默认目录，改用 nginx 自己的 conf.d
+#
+# 判定过程只读 nginx 的配置文件，不修改它（红线：脚本不碰宿主机 nginx）。
+
+abspath() {
+  if command -v realpath >/dev/null 2>&1; then
+    realpath -m "$1"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+# sudo 下 $HOME 会变成 /root，必须回到真实调用者的家目录
+real_user_home() {
+  local u="${SUDO_USER:-}" h=""
+  if [ -n "$u" ] && [ "$u" != "root" ]; then
+    h="$(getent passwd "$u" 2>/dev/null | cut -d: -f6)"
+  fi
+  [ -n "$h" ] || h="${HOME:-/root}"
+  printf '%s\n' "$h"
+}
+
+# nginx 主配置路径：从 nginx -V 的 --conf-path 取，取不到按发行版惯例
+nginx_main_conf() {
+  local p=""
+  if command -v nginx >/dev/null 2>&1; then
+    p="$(nginx -V 2>&1 | tr ' ' '\n' | sed -n 's/^--conf-path=//p' | head -1)"
+  fi
+  [ -n "$p" ] || p="/etc/nginx/nginx.conf"
+  printf '%s\n' "$p"
+}
+
+nginx_installed() { command -v nginx >/dev/null 2>&1; }
+
+# 看 nginx 的 include 有没有覆盖某个目录（递归最多 4 层，只读）
+conf_includes_dir() {
+  local target main
+  target="$(abspath "$1")"
+  main="$(nginx_main_conf)"
+  [ -r "$main" ] || return 1
+
+  local depth=0 f pat inc hit incs
+  local q=( "$main" ) next=() seen=" "
+  while [ ${#q[@]} -gt 0 ] && [ "$depth" -lt 4 ]; do
+    next=()
+    for f in "${q[@]}"; do
+      [ -r "$f" ] || continue
+      # 用 here-string 读，不用 <(...)：受限环境里 /dev/fd 可能不可用
+      incs="$(sed -n 's/^[[:space:]]*include[[:space:]][[:space:]]*\([^;]*\);.*/\1/p' "$f" 2>/dev/null)"
+      while IFS= read -r pat; do
+        [ -n "$pat" ] || continue
+        case "$pat" in
+          /*) : ;;
+          *)  pat="$(dirname "$f")/$pat" ;;
+        esac
+        hit=0
+        # 这里故意不加引号，让 shell 展开通配；匹配不到时保留原文
+        for inc in $pat; do
+          [ -e "$inc" ] || continue
+          hit=1
+          case "$(abspath "$inc")" in
+            "$target"|"$target"/*) return 0 ;;
+          esac
+          case "$seen" in
+            *" $inc "*) : ;;
+            *)  next+=( "$inc" ); seen="$seen$inc " ;;
+          esac
+        done
+        # 目录还空着、通配匹配不到文件：只要 include 指的就是目标目录也算
+        if [ "$hit" -eq 0 ]; then
+          [ "$(abspath "$(dirname "$pat")")" = "$target" ] && return 0
+        fi
+      done <<< "$incs"
+    done
+    q=( ${next[@]+"${next[@]}"} )
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
+# nginx 自己的 conf.d 目录：从主配置的 include 推，推不出按惯例
+nginx_own_conf_d() {
+  local main d
+  main="$(nginx_main_conf)"
+  d="$(sed -n 's/^[[:space:]]*include[[:space:]][[:space:]]*\([^;]*conf\.d[^;]*\)[[:space:]]*;.*/\1/p' "$main" 2>/dev/null | head -1)"
+  if [ -n "$d" ]; then
+    dirname "$d"
+  else
+    printf '/etc/nginx/conf.d\n'
+  fi
+}
+
+NGINX_CONF_DIR="${NGINX_CONF_DIR:-}"
+NGINX_CONF_SRC=""
+if [ -n "$NGINX_CONF_DIR" ]; then
+  case "$NGINX_CONF_DIR" in
+    /*) : ;;
+    *)  NGINX_CONF_DIR="$ROOT/$NGINX_CONF_DIR" ;;
+  esac
+  NGINX_CONF_DIR="$(abspath "$NGINX_CONF_DIR")"
+  NGINX_CONF_SRC="config.ini 指定"
+else
+  _ng_default="$(abspath "$(real_user_home)/nginx/conf.d")"
+  if conf_includes_dir "$_ng_default"; then
+    NGINX_CONF_DIR="$_ng_default"
+    NGINX_CONF_SRC="默认目录（nginx 已 include）"
+  elif nginx_installed; then
+    NGINX_CONF_DIR="$(abspath "$(nginx_own_conf_d)")"
+    NGINX_CONF_SRC="nginx 自己的 conf.d（默认目录 $_ng_default 没有被 include）"
+  else
+    NGINX_CONF_DIR="$_ng_default"
+    NGINX_CONF_SRC="默认目录（本机还没装 nginx，先按默认走）"
+  fi
+fi
+export NGINX_CONF_DIR NGINX_CONF_SRC
 
 # 注册中心地址统一去掉末尾斜杠，避免拼出 //v1/...
 REGISTRY="${REGISTRY%/}"
@@ -229,12 +352,121 @@ wait_instances() {
   return 1
 }
 
-# 等后端地址列表被写出来
+# 等后端地址列表被写出来。
+# 占位行（127.0.0.1:1 down）不算数——那只是让 nginx -t 别失败，不是真实例。
 wait_backend_file() {
   local f="$1" i
   for i in $(seq 1 25); do
-    [ -s "$f" ] && grep -q 'server ' "$f" 2>/dev/null && return 0
+    if [ -s "$f" ] && grep 'server ' "$f" 2>/dev/null | grep -qv '127\.0\.0\.1:1 down'; then
+      return 0
+    fi
     sleep 1
   done
   return 1
+}
+
+# ---------- nginx 配置文件的自动补齐 ----------
+# 规则：目标目录里缺哪个补哪个，已存在的一律不动（尊重手工调整）。
+
+# 从注册中心读当前 passing 实例，输出 nginx 的 server 行。拿不到返回非 0。
+render_servers_from_registry() {
+  local json
+  command -v curl >/dev/null 2>&1 || return 1
+  json="$(curl -fsS --max-time 5 \
+        "$REGISTRY/v1/health/service/$SERVICE_NAME?passing=1" 2>/dev/null)" || return 1
+  [ -n "$json" ] && [ "$json" != "[]" ] || return 1
+
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$json" | jq -r '
+      .[] | .Service as $s
+      | (if ($s.Address // "") == "" then .Node.Address else $s.Address end) as $a
+      | "  server \($a):\($s.Port) max_fails=2 fail_timeout=2s;"
+    ' 2>/dev/null
+  elif command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$json" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+for e in d:
+    s = e.get("Service") or {}
+    a = s.get("Address") or (e.get("Node") or {}).get("Address") or ""
+    p = s.get("Port")
+    if a and p:
+        print("  server %s:%s max_fails=2 fail_timeout=2s;" % (a, p))
+' 2>/dev/null
+  else
+    return 1
+  fi
+}
+
+# 生成 backends.conf（只在该文件不存在时调用）
+generate_backends_conf() {
+  local dir="$1" body
+  mkdir -p "$dir"
+  body="$(render_servers_from_registry || true)"
+  {
+    printf '# 由 deploy.sh 自动生成（%s），供 nginx 的 upstream 使用。\n' "$(date '+%F %T')"
+    printf '# generator 容器（consul-template）启动后会接管并持续重写这个文件。\n'
+    printf 'upstream %s {\n' "$SERVICE_NAME"
+    if [ -n "$body" ]; then
+      printf '%s\n' "$body"
+    else
+      printf '  server 127.0.0.1:1 down;   # 占位：暂无业务实例报到。down 表示不接流量，只保证 nginx -t 通过\n'
+    fi
+    printf '}\n'
+  } > "$dir/backends.conf"
+  chmod 644 "$dir/backends.conf"
+}
+
+# 生成 consul-demo.conf（只在该文件不存在时调用），端口与服务名取自 config.ini
+generate_site_conf() {
+  local dir="$1"
+  mkdir -p "$dir"
+  cat > "$dir/consul-demo.conf" <<EOF
+# 由 deploy.sh 自动生成（$(date '+%F %T')）。
+# 内容按 config.ini 的 SITE_PORT / SERVICE_NAME 渲染。
+# 改过这两项：删掉本文件重跑 ./deploy.sh gateway 会重新生成。
+# 手工调整过本文件：脚本只在文件不存在时生成，不会覆盖。
+server {
+    listen      $SITE_PORT;
+    server_name _;
+
+    location /api/demo/ {
+        # 末尾的 / 会去掉 /api/demo/ 这一段：后端收到的是 /v1/xxx
+        proxy_pass http://$SERVICE_NAME/;
+
+        proxy_set_header Host              \$host;
+        proxy_set_header X-Real-IP         \$remote_addr;
+        proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
+    }
+}
+EOF
+  chmod 644 "$dir/consul-demo.conf"
+}
+
+# 目标目录里缺哪个补哪个
+ensure_nginx_files() {
+  local dir="${1:-$NGINX_CONF_DIR}"
+  mkdir -p "$dir"
+
+  if [ -f "$dir/consul-demo.conf" ]; then
+    say "    站点配置    已存在，不改   $dir/consul-demo.conf"
+  else
+    generate_site_conf "$dir"
+    say "    站点配置    已生成       $dir/consul-demo.conf（listen $SITE_PORT → $SERVICE_NAME）"
+  fi
+
+  if [ -f "$dir/backends.conf" ]; then
+    say "    后端地址表  已存在，不改   $dir/backends.conf"
+  else
+    generate_backends_conf "$dir"
+    if grep -q '127\.0\.0\.1:1 down' "$dir/backends.conf" 2>/dev/null; then
+      say "    后端地址表  已生成（占位） $dir/backends.conf"
+      say "                还没有业务实例报到，先放一条 down 的占位，保证 nginx -t 不失败"
+    else
+      say "    后端地址表  已生成       $dir/backends.conf（取自注册中心）"
+    fi
+  fi
 }

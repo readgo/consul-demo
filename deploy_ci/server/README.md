@@ -36,11 +36,15 @@ deploy-consul-demo/
 ├── lib/common.sh       三个脚本共用
 └── roles/
     ├── center/         注册中心
-    ├── gateway/        网关
+    ├── gateway/        网关（生成 backends.conf 到 nginx 的配置目录）
     └── service/        业务应用
 ```
 
 没有 `image/` 目录 —— 这是与离线 tar 包那套唯一的区别。
+
+> nginx 的配置**不在这个目录里**。`deploy.sh gateway` 会自己判定目标目录，
+> 里面缺 `consul-demo.conf` / `backends.conf` 就各生成一份。判定规则见下文
+> 「nginx 配置目录怎么定」。
 
 ---
 
@@ -91,6 +95,9 @@ APP_PORT=3020
 # 网关对外端口
 SITE_PORT=8088
 
+# nginx 的配置目录。留空 = 自动判定（一般不用填）
+NGINX_CONF_DIR=
+
 # 服务名
 SERVICE_NAME=consul-demo
 ```
@@ -99,16 +106,48 @@ SERVICE_NAME=consul-demo
 
 **`IMAGE_TAG` 别长期用 `latest`。** 出问题时 `status` 会告诉你线上是哪个版本，前提是你钉了具体 tag。
 
+### nginx 配置目录怎么定
+
+`NGINX_CONF_DIR` 留空时，脚本按两条规则自己算：
+
+| 顺序 | 规则 | 结果举例 |
+|---|---|---|
+| 1 | 默认 `<当前用户家目录>/nginx/conf.d` | `sudo` 执行时按 `SUDO_USER` 的真实家目录算，不是 `/root` |
+| 2 | 若 nginx **没有 include** 这个默认目录，改用 nginx 自己的 `conf.d` | 从 `nginx.conf` 的 `include` 里推，推不出按 `/etc/nginx/conf.d` |
+
+判定只读 `/etc/nginx/nginx.conf`（路径取自 `nginx -V` 的 `--conf-path`），**不改它**。
+`deploy.sh gateway` 会打印实际用的目录和来源：
+
+```
+    目录    /home/jing/nginx/conf.d
+    来源    默认目录（nginx 已 include）
+```
+
+想固定到别处再填：相对路径按部署目录算，也可以写绝对路径。
+
+### 缺的配置自动补
+
+拿到目录后，脚本只补**不存在**的文件，已存在的一律不动：
+
+| 文件 | 缺了会怎样 | 补的方式 |
+|---|---|---|
+| `consul-demo.conf` | nginx 没有站点配置，`proxy_pass` 无从上手 | 按 `SITE_PORT` / `SERVICE_NAME` 生成一份 |
+| `backends.conf` | **`nginx -t` 照样通过**，但 `proxy_pass http://consul-demo/` 会被当成域名去解析，请求 502 或者莫名打到别的主机上——实测最容易误判的一类 | 先查注册中心；没有实例就写一条 `down` 占位（能过 `-t`、请求返回 502），generator 起来后接管 |
+
 ---
 
 ## 单机部署
 
 ```bash
 sudo ./deploy.sh all
+# 它会判定 nginx 配置目录，把 backends.conf 写进去，缺 consul-demo.conf 也一并生成
 
-# 让 nginx 认这个目录（手动，只做一次）
-echo "include $(pwd)/roles/gateway/conf.d/*.conf;" \
-  | sudo tee /etc/nginx/conf.d/consul-demo.conf
+# nginx 那边（手动，一次性；脚本不碰宿主机 nginx）
+#   只有一件事：如果 deploy.sh gateway 打印了「待办」，说明这个目录还没被 include，
+#   到 /etc/nginx/nginx.conf 的 http {} 里加一行：
+#        include /home/jing/nginx/conf.d/*.conf;
+#   没打印「待办」就说明已经 include 过了，什么都不用做。
+
 sudo nginx -t && sudo nginx -s reload
 
 # 验证
@@ -117,7 +156,7 @@ curl -s "http://$(hostname -I | awk '{print $1}'):8088/api/demo/v1/test?name=hel
 
 最后一条返回 `hello:hello` 就成了。
 
-> **顺序**：先跑 `deploy.sh`（它会把后端地址列表生成出来），再 reload nginx。
+> **顺序**：先跑 `deploy.sh`（它会把两个配置文件都准备好），再 reload nginx。
 > 反过来做，nginx 会因为找不到后端而报错。
 
 ---
@@ -156,8 +195,9 @@ sudo ./deploy.sh service
 sudo ./deploy.sh center
 sudo ./deploy.sh gateway
 
-echo "include $(pwd)/roles/gateway/conf.d/*.conf;" \
-  | sudo tee /etc/nginx/conf.d/consul-demo.conf
+# nginx 那边（手动，一次性）
+cp <仓库根>/nginx/consul-demo.conf ../nginx/conf.d/
+# /etc/nginx/nginx.conf 的 http {} 里要有：include /home/jing/nginx/conf.d/*.conf;
 sudo nginx -t && sudo nginx -s reload
 ```
 
@@ -191,7 +231,7 @@ sudo ./deploy.sh service
 | 2 | `./deploy.sh status` 最后一行 | `config.ini 里配的是 wttcvs/consul-demo:<tag>`，与容器实际镜像一致 |
 | 3 | `curl -s localhost:8500/v1/status/leader` | `"<本机内网IP>:8300"` |
 | 4 | `curl -s localhost:8500/v1/catalog/service/consul-demo` | 地址是内网 IP，**不是 127.0.0.1** |
-| 5 | `cat roles/gateway/conf.d/backends.conf` | 每台业务机一行 `server` |
+| 5 | `cat $NGINX_CONF_DIR/backends.conf`（`deploy.sh gateway` 会打印实际路径） | 每台业务机一行 `server` |
 | 6 | `curl -s "http://<本机IP>:8088/api/demo/v1/test?name=x"` | `hello:x` |
 | 7 | `docker inspect --format '{{.Config.Image}}' consul-demo-3020` | 就是 `config.ini` 里那个 tag |
 
@@ -208,7 +248,7 @@ sudo ./deploy.sh service
 | 报「还没准备好」 | 能连上但没选出主，等 30 秒再执行 |
 | 报到成功，但网关里是 `127.0.0.1` | `MY_IP` 填错了，或探测到虚拟网卡。手工填真实内网地址 |
 | 列表变了但访问没变化 | 忘了 reload：`sudo nginx -s reload` |
-| 访问 502 | 看 `backends.conf` 有没有 server 行；有就直连那个地址试 `curl <地址>/healthz` |
+| 访问 502 | 先看 `backends.conf` 里是不是只有 `127.0.0.1:1 down` 占位（占位只是为了让 `-t` 过，照样 502）；有真实地址就直连试 `curl <地址>/healthz` |
 | 升级后行为没变 | `docker inspect` 看容器镜像 tag 是不是新的；`docker compose` 可能用了本地旧镜像，重跑 `service` 会强制拉取 |
 | 注册报 `permission denied` | `sudo chmod 777 roles/center/data/center` |
 
@@ -216,6 +256,26 @@ sudo ./deploy.sh service
 
 ## 关于 nginx
 
-脚本**不改**宿主机的 nginx 配置，只把配置文件准备好。上面那两条命令需要你自己敲。
+**脚本负责「目录判定 + 缺文件补齐 + 写 backends.conf」，nginx 的 include 和 reload 由人负责。**
 
-为什么不做成自动的：容器里的程序给宿主机 nginx 发重启信号会被系统拦住，硬要做就得往宿主机装常驻服务，那等于改了系统配置。
+| 谁 | 做什么 |
+|---|---|
+| `deploy.sh gateway` | 判定目录；缺 `consul-demo.conf` 就生成；缺 `backends.conf` 就补一份（查注册中心，查不到写 down 占位） |
+| `deploy.sh gateway` | 起 generator，之后 `backends.conf` 由它持续重写 |
+| 你，手动一次（仅当脚本提示「待办」） | 在 `/etc/nginx/nginx.conf` 的 `http {}` 里加 `include <那个目录>/*.conf;` |
+| 你，后端有变化后 | `sudo nginx -t && sudo nginx -s reload` |
+
+默认算出来的目录就是这个结构，开箱可用（`sudo` 执行时按真实用户家目录算）：
+
+```
+~/server                  部署目录（deploy.sh 在这里）
+~/nginx/conf.d/           include 目录
+  ├── consul-demo.conf         缺了自动生成（listen 8088 + proxy_pass）
+  └── backends.conf            缺了自动补，之后由 generator 持续重写
+```
+
+想要**手动版本**的站点配置，仓库根 `nginx/consul-demo.conf` 就是默认值样品，`cp` 过去即可；
+只要目标文件已存在，脚本不会再覆盖。
+
+脚本**不改**宿主机的 nginx 配置，也不执行 `nginx -t` / `nginx -s reload`——
+这是刻意的：容器里的程序给宿主机 nginx 发重启信号会被系统拦住，硬要做就得往宿主机装常驻服务，那等于改了系统配置。

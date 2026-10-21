@@ -29,6 +29,15 @@ APP_PORT=3020
 #   nginx 监听哪个端口把流量转给后端。
 SITE_PORT=8088
 
+# ---------- nginx 配置目录 ----------
+#   留空 = 自动判定（推荐，一般不用填）：
+#     1. 默认用 <当前用户家目录>/nginx/conf.d
+#     2. 若 nginx 没有 include 这个默认目录，改用 nginx 自己的 conf.d
+#        （从 nginx.conf 的 include 里推，推不出按 /etc/nginx/conf.d）
+#   想固定到别处再填：相对路径按部署目录算（例 ../nginx/conf.d），也可写绝对路径。
+#   注意：sudo 下会按真实调用者（SUDO_USER）的家目录算，不是 /root。
+NGINX_CONF_DIR=
+
 # ---------- 服务名 ----------
 #   应用注册到注册中心时用的名字，也是 nginx 找后端的依据。
 #   多套环境共用一台注册中心时才需要改。

@@ -1,142 +1,123 @@
-# 构建脚本
+# 构建工具
 
-这个目录**只有脚本**，没有运行件，也不上服务器。
-跑脚本产出的 `../server` 才是要拖到服务器上的东西。
-
-## 一句话
-
-**`./pack.sh` → 把 `../server` 整个拖到服务器。**
-
----
-
-## 1. deploy 下三个目录，各管一段
+`deploy/` 下只有两个目录：**`build/`（车间）和 `server/`（成品）**。
 
 ```
 deploy/
-├── src/        运行件的源文件（改东西改这里）
-├── build/      ← 本目录，构建用的东西全在这里
-│   ├── README.md
-│   ├── Dockerfile           应用镜像怎么打
-│   ├── build-image.sh       调上面的 Dockerfile，打出镜像包
-│   └── pack.sh              产出干净的交付目录
-└── server/     产出的交付目录，整个拖到服务器
+├── build/                   ← 本目录：只有构建工具，没有部署脚本
+│   ├── Dockerfile              应用镜像怎么打
+│   ├── build-image.sh          调 Dockerfile，导出镜像包
+│   ├── pack.sh                 打镜像 + 校验成品目录
+│   └── README.md
+└── server/                  ← 部署件的唯一源，也是要拖到服务器的那一份
+    ├── deploy.sh
+    ├── config.ini.example
+    ├── lib/common.sh
+    ├── roles/{center,gateway,service}/
+    ├── image/*.tar.gz          产物（build-image.sh 生成）
+    ├── VERSION.txt             产物（pack.sh 生成）
+    └── README.md
 ```
 
-一段话概括：**`src` 是原料，`build` 是车间，`server` 是成品。**
-
-| 目录 | 放什么 | 能不能拖到服务器 |
-|---|---|---|
-| `src/` | 运行件的源代码 | 不要 |
-| `build/` | `Dockerfile` + 两个脚本 | 不要，服务器用不上 |
-| `server/` | 白名单挑出来的成品 | **就这个** |
-
-> `Dockerfile`、`build-image.sh`、`pack.sh` 三者是一套的：
-> 打包脚本调打镜像脚本，打镜像脚本调 `Dockerfile`。
-> 所以全放在同一个目录里，不用钻子目录，改哪一环一眼能找到。
+**部署脚本没有第二份。** 要改 `deploy.sh`、`run.sh`、`compose.yaml`，直接改 `server/` 里的，改完就是生效版本，不需要任何复制动作。
 
 ---
 
-## 2. 一个命令就够
+## 一句话
+
+**改 `server/` 里的脚本（或改项目根 `src/` 的代码）→ `./pack.sh` → 把 `server` 整个拖到服务器。**
+
+---
+
+## `pack.sh` 只做两件事
 
 ```bash
-./pack.sh
+./pack.sh                 # 打镜像 + 校验（最常用）
+./pack.sh --no-build      # 应用代码没动，只校验
+./pack.sh --build-only    # 只打镜像
 ```
 
-它自己会按顺序做两件事：
+1. **打镜像** —— 调 `build-image.sh`，产物直接落在 `../server/image/consul-demo-image.tar.gz`（不另存一份）；
+2. **校验成品目录** —— 见下一节，然后写 `VERSION.txt`。
 
-1. 调 `./build-image.sh`，把应用打成镜像包 ——→ `../src/image/consul-demo-image.tar.gz`
-2. 按白名单产出干净的交付目录 ——→ `../server`
+**它不清空、不复制任何部署件。** 你放在 `server/` 里的东西原样就在那儿。
 
-然后打开 WindTerm，把 `deploy/server` 这个文件夹拖到服务器，命名为 `deploy-consul-demo`。
+**nginx 配置不随包走。** 仓库里只有一份 `nginx/consul-demo.conf`，由人手动复制到宿主机
+nginx 的 include 目录（`config.ini` 里的 `NGINX_CONF_DIR`）。成品目录里出现 `nginx/`，
+`pack.sh` 会报错中止。
 
-### 另外两种跑法
+---
 
-| 命令 | 做什么 | 什么时候用 |
+## 校验：成品目录里只能有服务器自己会用的文件
+
+`server/` 既是唯一源、又是交付物，所以干净只能靠反向检查——`pack.sh` 扫一遍，发现下面这些就**中止**（退出码 1）：
+
+| 检查 | 拦什么 | 为什么 |
 |---|---|---|
-| `./pack.sh` | 打镜像 + 产出交付目录 | 默认，改了应用代码、或者不确定该用哪个 |
-| `./pack.sh --no-build` | 只用现成的镜像包，产出交付目录 | 只改过 `deploy/src/` 里的脚本或 `config.ini`，应用代码没动 |
-| `./pack.sh --build-only` | 只打镜像，不产出交付目录 | 想单独确认镜像能打出来 |
+| 必需清单 | `deploy.sh`、`config.ini.example`、`lib/common.sh`、`roles/*/{run.sh,compose.yaml}`、`backends.ctmpl` | 缺一个服务器上就装不起来 |
+| 构建工具 | `pack.sh`、`build-image.sh`、`Dockerfile`、`Makefile` | 服务器不会用 |
+| 本机配置 | `config.ini` | 含本机地址，带上服务器会覆盖那边该自动生成的那份 |
+| 开发文档 | 除 `README.md` 外的任何 `*.md` | 服务器只看 README |
+| 源码 | `*.ts`、`package.json`、`package-lock.json`、`tsconfig.json` | 跑的是镜像，不是源码 |
+| nginx 配置 | `nginx/` 整个目录 | nginx 配置不随包走，由人手动复制到 include 目录 |
 
-`--no-build` 时如果连镜像包都没有，会直接报错停下，不会产出一份缺镜像的半成品。
-
----
-
-## 3. 白名单就是唯一真相
-
-`pack.sh` 里写死的清单，决定什么能进 `server/`：
-
-```bash
-FILES=(
-  deploy.sh  config.ini.example  lib/common.sh
-  roles/center/run.sh   roles/center/compose.yaml
-  roles/gateway/run.sh  roles/gateway/compose.yaml
-  roles/gateway/site.conf  roles/gateway/backends.ctmpl
-  roles/service/run.sh  roles/service/compose.yaml
-)
-DIRS=( roles/center/data/center  roles/gateway/conf.d )
-```
-
-外加 `server/README.md`（手写说明）、`server/VERSION.txt`（自动生成）、`image/*.tar.gz`。
-
-**清单外的东西永远进不了 `server/`。** 这是「服务器干净」的保证方式 ——
-不靠一条条排除（漏一条就污染），而是靠白名单（没写就是不会过去）。
-
-在 `src/` 里新增一个运行时要用的文件时，**必须同时加进 `FILES`**。
+被拦时不要绕过，删掉那些文件重跑。`config.ini` 删了零损失——`deploy.sh` 下次运行会自动从 `config.ini.example` 生成。
 
 ---
 
-## 4. 三个目录里不会互相抄
-
-| | 会不会出现运行件 | 会不会出现脚本 |
-|---|---|---|
-| `src/` | 会（就是源） | 不会 |
-| `build/` | **不会**（只有脚本） | 会（就是脚本） |
-| `server/` | 会（就是成品） | 不会 |
-
-之前 `build/` 里同时放了脚本和一份完整运行件，和 `server/` 长得几乎一样，
-容易让人分不清哪个是要拖走的。现在分开了。
-
----
-
-## 5. 项目根已经干净了
-
-`Dockerfile` 原来放在项目根的 `build/` 下，和调用它的脚本隔着老远。
-既然只有那一个脚本用它，就挪到 `deploy/build/Dockerfile`，和脚本放一起。
-
-现在项目根只有：`src/` `dist/` `package.json` `package-lock.json` `tsconfig.json` `deploy/`。
-
-构建时 `build-image.sh` 会先 cd 到项目根，再执行：
-
-```bash
-docker build -f deploy/build/Dockerfile -t consul-demo:local .
-```
-
-`-f` 指文件在哪，末尾的 `.` 指构建上下文是项目根（Dockerfile 里要 COPY `src/`、`package.json`）。
-
----
-
-## 6. 数据不会被覆盖
-
-`pack.sh` 每次清空 `server/` 重建，但服务器上的这些东西不受影响：
-
-- `roles/center/data/` —— 产物里只有空目录，已有的注册数据不会被删
-- `roles/gateway/conf.d/backends.conf` —— 产物里只有空目录，已生成的地址列表不会被清
-
-所以重复上传、重复部署都是安全的。
-
----
-
-## 7. 改了东西之后的流程
+## 改了东西之后
 
 | 改了什么 | 要做的事 |
 |---|---|
-| 应用代码（项目根的 `src/`） | `./pack.sh` → 拖到服务器 → `sudo ./deploy.sh service` |
-| `deploy/src/` 里的脚本或 `config.ini` | `./pack.sh --no-build` → 拖到服务器 → 重启对应角色 |
-| 服务器侧说明 | 直接改 `deploy/server/README.md`（`pack.sh` 不会覆盖它） |
+| 应用代码（项目根 `src/`） | `./pack.sh` → 拖 `server` → `sudo ./deploy.sh service` |
+| 部署脚本（`server/deploy.sh`、`server/roles/*/run.sh`、`compose.yaml`） | `./pack.sh --no-build` → 拖 `server` → 重启对应角色 |
+| nginx 配置（仓库根 `nginx/consul-demo.conf`） | 手动复制到 `~/nginx/conf.d/` → `sudo nginx -t && sudo nginx -s reload`（跟打包无关） |
+| 服务器侧说明 | 直接改 `server/README.md` |
+
+`./pack.sh --no-build` 时如果连镜像包都没有，会直接报错，不会吐出半成品。
 
 ---
 
-## 8. 服务器上怎么用
+## `config.ini` 和 `config.ini.example`
 
-那份说明写在 `deploy/server/README.md` 里，会随成品一起拖过去，
-服务器上直接看得到：三块功能怎么装、单机/双机步骤、验收判据、常见问题。
+| 文件 | 进仓库 | 进交付 | 谁用 |
+|---|---|---|---|
+| `config.ini.example` | ✅ | ✅ | 模板，第一次运行时自动复制成 `config.ini` |
+| `config.ini` | ❌（.gitignore 挡） | ❌（`pack.sh` 拦） | 本机实跑时的真实配置 |
+
+配置文件特意**不带点号**：带点号的文件 `ls` 看不见，服务器上容易误以为没有配置文件。
+
+服务器上第一次执行任何 `deploy.sh` 命令时，`lib/common.sh` 会发现没有 `config.ini`，自动从模板复制一份；已存在的不会被覆盖。
+
+**改了配置项的含义或默认值，两处都要同步改**：`server/config.ini.example`（模板）和 `server/lib/common.sh` 里的 `${VAR:-默认值}`（兜底）。
+
+---
+
+## 为什么不再用「白名单复制」
+
+早先的做法是：源放 `build/`，`pack.sh` 按白名单挑件复制进 `server/`。代价是**同一批脚本存在两份**——改一次要改两处，还得记得重新打包，`server/` 里那份是死的副本。
+
+现在 `server/` 就是源，数据只有一份。干净的保证从「结构性（进不去）」换成「检查性（打包时报错）」，换到的是零重复。
+
+---
+
+## 项目根只放程序
+
+`Dockerfile` 归构建工具，所以它在本目录，不在项目根。
+
+```bash
+docker build -f deploy/build/Dockerfile -t consul-demo:local .   # 上下文是项目根
+```
+
+项目根现在是：`src/` `dist/` `package.json` `package-lock.json` `tsconfig.json` `deploy/` `deploy_ci/` `nginx/`。
+
+---
+
+## 运行时数据不会被覆盖
+
+`pack.sh` 不删任何东西，服务器上的这些也各自独立：
+
+- `roles/center/data/` —— 产物里只有空目录，注册数据不受影响
+- `$NGINX_CONF_DIR/backends.conf` —— generator 直接写到 nginx 的配置目录，不在部署目录里留副本
+
+重复上传、重复部署都安全。

@@ -1,15 +1,17 @@
 # 把注册中心里的服务列表，变成 nginx 能读的后端地址列表。
 # 服务增减时这里会自动重写，不需要人来改。
 #
-# 用到的标签：
-#   服务带 web 标签  -> 才会被写进地址列表（不是所有注册上来的都该接收流量）
+# 只写一个 upstream：名字取容器环境变量 SERVICE_NAME（compose 从 config.ini 传进来），
+# 和 consul-demo.conf 里的 proxy_pass 严格对齐。名字不一致时 nginx -t 不报错，
+# 但请求会 502，属最难查的一类故障。
+#
+# 一条实例都没有时写 down 占位。必须这么做：空 upstream 块会让 nginx 直接
+# 拒绝加载（no servers are inside upstream）；down 的 server 不接流量，只为过语法检查。
 
-{{ range services }}
-{{ if in .Tags "web" }}
-upstream {{ .Name }} {
-{{ range service .Name }}
+upstream {{ env "SERVICE_NAME" }} {
+{{ range service (env "SERVICE_NAME") }}
   server {{ .Address }}:{{ .Port }} max_fails=2 fail_timeout=2s;
+{{ else }}
+  server 127.0.0.1:1 down;   # 占位：暂无实例报到，不接流量
 {{ end }}
 }
-{{ end }}
-{{ end }}

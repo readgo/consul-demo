@@ -1,0 +1,20 @@
+# 角色二：网关
+# 负责把外面的请求按「后端地址列表」转给各台业务机。
+# 加机器、删机器都不用改这里——地址列表是自动生成的。
+name: consul-demo-gateway
+
+services:
+  generator:
+    image: hashicorp/consul-template:0.39.1
+    container_name: consul-demo-generator
+    restart: unless-stopped
+    network_mode: host
+    user: root                # 镜像默认用户写不了卷目录，必须给 root
+    command:
+      # 从注册中心拉服务列表
+      - "-consul-addr=${REGISTRY_HOSTPORT}"
+      # 模板 -> 生成 nginx 用的后端地址列表；只写文件，不碰 nginx 进程
+      - "-template=./backends.ctmpl:./conf.d/backends.conf"
+    volumes:
+      - ./:/work
+    working_dir: /work

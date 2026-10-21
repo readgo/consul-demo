@@ -1,0 +1,16 @@
+node_modules/
+dist/
+*.log
+
+# 本地实跑配置：含本机地址，模板 config.ini.example 则要进仓库
+deploy/src/config.ini
+
+# 应用镜像包体积大，单独管理
+deploy/src/image/*.tar.gz
+
+# 交付目录：由 pack.sh 产出，除了手写的 README.md 都不进仓库
+deploy/server/*
+!deploy/server/README.md
+
+# 本地工作记忆：含内网地址、主机名、排查草稿，不进仓库
+.workbuddy/

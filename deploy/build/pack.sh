@@ -60,6 +60,7 @@ REQUIRED=(
   roles/gateway/run.sh
   roles/gateway/compose.yaml
   roles/gateway/backends.ctmpl
+  roles/gateway/reload-nginx.sh
   roles/service/run.sh
   roles/service/compose.yaml
 )

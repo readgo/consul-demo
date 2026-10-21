@@ -1,0 +1,28 @@
+# 角色三：业务应用
+#
+# 每台业务机都用这一份。加机器 = 把整个目录拷到新机器 + 执行 ./deploy.sh service。
+# 老机器不用改任何东西。
+#
+# 注意：这里故意不写死端口和地址，全部由 run.sh 通过环境变量传进来。
+# 镜像也不写死 —— IMAGE_REF 是 config.ini 里的 IMAGE_REPO:IMAGE_TAG，
+# 由 run.sh 拼好传进来。换版本 = 改 config.ini 里那一行 + 重跑一次 service。
+#
+# 项目名必须带实例名。不带的话同一台机器起第二个实例时，
+# 两份配置会被当成同一个项目，第一个实例会被一起重建（短暂中断）。
+name: ${INSTANCE_ID}
+
+services:
+  app:
+    image: ${IMAGE_REF}
+    container_name: ${INSTANCE_ID}
+    restart: unless-stopped
+    # 必须宿主网络：应用要把「本机内网 IP + 端口」报到注册中心，
+    # 健康检查也由注册中心直接访问这个地址。走容器内部网络会报到错误的地址。
+    network_mode: host
+    environment:
+      PORT: ${APP_PORT}
+      HOST: 0.0.0.0
+      ADVERTISE_HOST: ${MY_IP}                 # 报给别人的地址，不能是 0.0.0.0
+      CONSUL_HTTP_ADDR: ${REGISTRY}
+      INSTANCE_ID: ${INSTANCE_ID}              # 带端口，同机多实例才不互相覆盖
+      SERVICE_NAME: ${SERVICE_NAME}

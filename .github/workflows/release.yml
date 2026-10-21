@@ -1,0 +1,104 @@
+name: release
+
+# ============================================================
+#  构建应用镜像并推送到 Docker Hub。
+#
+#  触发方式只有一种：推送 v* 形式的 tag。
+#  正常不要手动跑，用 deploy_ci/release/release.sh —— 它会做四件事：
+#  查工作区干不干净、打 tag、推 tag、等你确认镜像真的上去了。
+#
+#  依赖两个仓库密钥（Settings -> Secrets and variables -> Actions）：
+#    DOCKER_USERNAME   Docker Hub 用户名
+#    DOCKER_TOKEN      Docker Hub Access Token（不要用登录密码）
+#
+#  这个文件必须放在仓库根的 .github/workflows/ 下，
+#  GitHub 只认这个路径，放在 deploy_ci/ 里它不会执行。
+# ============================================================
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# 同一个 tag 被重复推送时取消上一次，避免两遍构建互相覆盖
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: consul-demo
+
+jobs:
+  build:
+    name: 构建并推送镜像
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取代码
+        uses: actions/checkout@v4
+
+      - name: 准备 buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 检查密钥是否配了
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_TOKEN: ${{ secrets.DOCKER_TOKEN }}
+        run: |
+          # 密钥没配时 docker login 会报 "unauthorized"，看不出是缺密钥，
+          # 所以在前面显式挡一下，错误信息直接指到该去哪配。
+          # 用 env 传值而不是直接插进脚本，避免值里有引号时把脚本写坏。
+          if [ -z "$DOCKER_USERNAME" ] || [ -z "$DOCKER_TOKEN" ]; then
+            echo "::error::缺少仓库密钥 DOCKER_USERNAME 或 DOCKER_TOKEN"
+            echo "Settings -> Secrets and variables -> Actions -> New repository secret"
+            exit 1
+          fi
+
+      - name: 登录 Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: 构建并推送
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # 镜像构建文件只有一份，留在 deploy/build/。
+          # deploy_ci 不复制它，避免两个 Dockerfile 各自漂移。
+          file: deploy/build/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 汇总
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          # 这里故意不把 DOCKER_USERNAME 打出来：它是密钥，日志和摘要里会被打码成 ***，
+          # 打出来反而看不清。镜像命名空间默认与仓库所有者一致。
+          {
+            echo "## 镜像已发布"
+            echo
+            echo '| 项 | 值 |'
+            echo '|---|---|'
+            echo "| tag | \`$TAG\` |"
+            echo "| 摘要 | \`${{ steps.build.outputs.digest }}\` |"
+            echo "| 提交 | \`${{ github.sha }}\` |"
+            echo "| 镜像 | \`${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$TAG\` |"
+            echo
+            echo "如果 Docker Hub 账号和 GitHub 仓库所有者不是同一个，把上面的命名空间换成你配的那个。"
+            echo
+            echo "服务器上把 config.ini 改成："
+            echo
+            echo '```'
+            echo "IMAGE_TAG=$TAG"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

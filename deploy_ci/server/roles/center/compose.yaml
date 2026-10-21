@@ -1,0 +1,28 @@
+# 角色一：注册中心
+# 只在需要当注册中心的那台机器上跑，装完就不用再动它。
+# 以后加机器、删机器，都不需要改这个文件。
+name: consul-demo-center
+
+services:
+  registry:
+    image: hashicorp/consul:1.20
+    container_name: consul-demo-center
+    restart: unless-stopped
+    # 必须是宿主网络。别的机器要按本机内网 IP 来连它，
+    # 走容器内部网络的话外面连不上，且健康检查探测的回环地址会指错地方。
+    network_mode: host
+    command:
+      - agent
+      - -server
+      - -bootstrap-expect=1
+      - -data-dir=/consul/data
+      # 机器上常有多张网卡（docker0、虚拟机网卡），不指定就直接启动失败，
+      # 报 "Multiple private IPv4 addresses found"。这两个值由脚本按本机实际 IP 传进来，
+      # 换机器不用改文件。
+      - -bind=0.0.0.0
+      - -advertise=${MY_IP}
+      - -client=0.0.0.0      # 对外开放 8500，让其它机器能来注册
+      - -ui
+    volumes:
+      # 数据落在本角色目录下的 data/center，删容器不丢注册记录；脚本会 chmod 777
+      - ./data/center:/consul/data

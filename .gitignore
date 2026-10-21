@@ -4,6 +4,8 @@ dist/
 
 # 本地实跑配置：含本机地址，模板 config.ini.example 则要进仓库
 deploy/src/config.ini
+# 服务器侧那份可能被填了仓库 token，更不能进仓库
+deploy_ci/server/config.ini
 
 # 应用镜像包体积大，单独管理
 deploy/src/image/*.tar.gz

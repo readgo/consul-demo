@@ -24,7 +24,10 @@ if [ -z "${URL:-}" ]; then
   URL='http://localhost:30080/v1/test?name=jing-{TS}'
 fi
 INTERVAL_MS="${INTERVAL_MS:-100}"
-DURATION_SEC="${DURATION_SEC:-0}"      # 0 = 一直跑，Ctrl+C 结束
+DURATION_SEC="${DURATION_SEC:-0}"      # 0 = 一直跑，Ctrl+C 结束；支持小数如 0.5
+# 先换算成毫秒整数。不能直接在 $(( )) 里写 DURATION_SEC * 1000 ——
+# bash 算术只认整数，传 0.5 会报 "invalid arithmetic operator" 直接退出。
+DURATION_MS=$(awk -v s="$DURATION_SEC" 'BEGIN{printf "%d", s*1000}')
 EXPECT="${EXPECT:-jing}"               # 响应体必须包含的子串，空串则只校验 HTTP 200
 TIMEOUT="${TIMEOUT:-3}"                # 单次请求超时（秒）
 QUIET_OK="${QUIET_OK:-0}"              # 1 = 只打印失败行，成功行不刷屏
@@ -126,6 +129,7 @@ echo "────────────────────────�
 show "URL 模板 ：$URL"
 show "示例请求 ：$(build_url "$(ts_compact)")"
 show "间隔 ${INTERVAL_MS}ms  超时 ${TIMEOUT}s  期望响应含 '${EXPECT}'"
+show "行尾 N/M = 累计成功 N 次 / 累计请求 M 次"
 if [[ "$URL" == *'{TS}'* ]]; then
   show "说明     ：每轮把 {TS} 替换成当前时间戳，所以每次请求的 name 都不同"
 fi
@@ -133,7 +137,7 @@ show "按 Ctrl+C 结束并出汇总；另开窗口执行 ./k8s/deploy.sh 触发�
 echo "────────────────────────────────────────────────────"
 
 while :; do
-  if [ "$DURATION_SEC" != "0" ] && [ $(( $(now_ms) - T0 )) -ge $(( DURATION_SEC * 1000 )) ]; then
+  if [ "$DURATION_MS" -gt 0 ] && [ $(( $(now_ms) - T0 )) -ge "$DURATION_MS" ]; then
     summary; exit "$SUMMARY_RC"
   fi
 
@@ -174,12 +178,12 @@ while :; do
     if [ "$in_seg" -eq 1 ]; then
       # 中断结束，闭合区间
       segments+=("$(hms2 $(( seg_start_abs ))) → $(hms2 $(( start )))  持续 $(fmt_sec $(( start - seg_start_abs )))s  连续失败 ${seg_cnt} 次  ${seg_reason}")
-      show "${C_YEL}▲ 恢复${C_END}  ${line_ts}  中断段持续 $(fmt_sec $(( start - seg_start_abs )))s，失败 ${seg_cnt} 次"
+      show "${C_YEL}▲ 恢复${C_END}  ${line_ts}  中断段持续 $(fmt_sec $(( start - seg_start_abs )))s，失败 ${seg_cnt} 次  ${ok}/${total}"
       in_seg=0; seg_cnt=0; seg_reason=''
     fi
     if [ "$QUIET_OK" != "1" ]; then
-      printf '%s\n' "[$(printf '%8s' "${rel}s")] ${line_ts}  ${C_DIM}200${C_END} $(printf '%5s' "${dur_ms}ms")  ${body}"
-      say "[${rel}s] ${line_ts}  200 ${dur_ms}ms  ${body}"
+      printf '%s\n' "[$(printf '%8s' "${rel}s")] ${line_ts}  ${C_DIM}200${C_END} $(printf '%5s' "${dur_ms}ms")  ${body}  ${C_DIM}${ok}/${total}${C_END}"
+      say "[${rel}s] ${line_ts}  200 ${dur_ms}ms  ${body}  ${ok}/${total}"
     fi
   else
     fail=$((fail+1))
@@ -187,8 +191,8 @@ while :; do
       in_seg=1; seg_start_abs=$start; seg_cnt=0; seg_reason=$reason
     fi
     seg_cnt=$((seg_cnt+1))
-    printf '%s\n' "${C_RED}[$(printf '%8s' "${rel}s")] ${line_ts}  FAIL $(printf '%5s' "${dur_ms}ms")  ${reason}${C_END}"
-    say "[${rel}s] ${line_ts}  FAIL ${dur_ms}ms  ${reason}"
+    printf '%s\n' "${C_RED}[$(printf '%8s' "${rel}s")] ${line_ts}  FAIL $(printf '%5s' "${dur_ms}ms")  ${reason}  ${ok}/${total}${C_END}"
+    say "[${rel}s] ${line_ts}  FAIL ${dur_ms}ms  ${reason}  ${ok}/${total}"
   fi
 
   # 节奏控制：扣掉本轮已耗时，补齐到 INTERVAL_MS

@@ -1,0 +1,19 @@
+[Unit]
+Description=Tengine Web Server (consul-demo 前置入口)
+Documentation=https://tengine.taobao.org/
+After=network-online.target remote-fs.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+PIDFile=/usr/local/tengine/logs/tengine.pid
+ExecStartPre=/usr/local/tengine/sbin/nginx -t -c /usr/local/tengine/conf/nginx.conf
+ExecStart=/usr/local/tengine/sbin/nginx -c /usr/local/tengine/conf/nginx.conf
+ExecReload=/usr/local/tengine/sbin/nginx -s reload -c /usr/local/tengine/conf/nginx.conf
+ExecStop=/bin/kill -s QUIT $MAINPID
+PrivateTmp=true
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

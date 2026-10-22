@@ -32,8 +32,9 @@ APP_PORT=3020
 SITE_PORT=8088
 NGINX_CONF_DIR=
 SERVICE_NAME=consul-demo
-IMAGE_REPO=wttcvs/consul-demo
-IMAGE_TAG=latest
+CONSUL_LOGIN_USER=admin
+CONSUL_LOGIN_PASS=
+CONSUL_ADDR=127.0.0.1:8500
 EOF
     chmod 644 "$CONF"
     printf '[提示] 既没有 %s 也没有 %s，已用内置默认值生成一份。\n\n' "$CONF" "$CONF_TPL"
@@ -63,6 +64,15 @@ SERVICE_NAME="${SERVICE_NAME:-consul-demo}"
 # 这几个要给 docker compose 做变量替换，必须显式导出：
 # config.ini 里没写某一项时，上面的兜底赋值不会自动带上 export 属性。
 export REGISTRY MY_IP APP_PORT SITE_PORT SERVICE_NAME
+
+# ---------- Consul 管理界面（挂在站点的子路径下，要密码）----------
+# 界面路径固定 /consul/，注册中心启动时就按这个路径提供，nginx 原样转发。
+# 密码留空 = 站点上不暴露管理界面（注册中心自己照常在跑）。
+CONSUL_LOGIN_USER="${CONSUL_LOGIN_USER:-admin}"
+CONSUL_LOGIN_PASS="${CONSUL_LOGIN_PASS:-}"
+CONSUL_ADDR="${CONSUL_ADDR:-127.0.0.1:8500}"
+CONSUL_UI_PATH="/consul/"
+export CONSUL_LOGIN_USER CONSUL_LOGIN_PASS CONSUL_ADDR CONSUL_UI_PATH
 
 # ---------- 镜像来自哪 ----------
 # 与 deploy/ 那套的区别只有这一处：那边是本地打 tar 包再 docker load，
@@ -427,8 +437,8 @@ generate_site_conf() {
   mkdir -p "$dir"
   cat > "$dir/consul-demo.conf" <<EOF
 # 由 deploy.sh 自动生成（$(date '+%F %T')）。
-# 内容按 config.ini 的 SITE_PORT / SERVICE_NAME 渲染。
-# 改过这两项：删掉本文件重跑 ./deploy.sh gateway 会重新生成。
+# 内容按 config.ini 的 SITE_PORT / SERVICE_NAME / CONSUL_* 渲染。
+# 改过这些项：删掉本文件重跑 ./deploy.sh gateway 会重新生成。
 # 手工调整过本文件：脚本只在文件不存在时生成，不会覆盖。
 server {
     listen      $SITE_PORT;
@@ -442,9 +452,83 @@ server {
         proxy_set_header X-Real-IP         \$remote_addr;
         proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
     }
-}
 EOF
+
+  # 管理界面只在配了密码时才出现在站点上：没密码就不开这个入口，
+  # 免得把没鉴权的 Consul 暴露出去。
+  if [ -n "$CONSUL_LOGIN_PASS" ]; then
+    cat >> "$dir/consul-demo.conf" <<EOF
+
+    # ---- Consul 管理界面：$CONSUL_UI_PATH（需要密码）----
+    # 页面由注册中心自己提供，这里只做转发 + 密码校验，不改它的页面。
+    location = ${CONSUL_UI_PATH%/} {
+        return 301 $CONSUL_UI_PATH;
+    }
+
+    location $CONSUL_UI_PATH {
+        auth_basic           "consul demo";
+        auth_basic_user_file "$dir/consul-demo.htpasswd";
+
+        proxy_pass           http://$CONSUL_ADDR;
+        proxy_http_version   1.1;
+        proxy_set_header     Host              \$host;
+        proxy_set_header     X-Real-IP         \$remote_addr;
+        proxy_set_header     X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        # 界面用阻塞查询，单次请求最长挂 5 分钟，别让 nginx 先把它掐了
+        proxy_read_timeout   330s;
+        proxy_buffering      off;
+    }
+
+    # 界面里的接口调用写死成根路径 /v1/，同样要密码。
+    # 业务接口走 /api/demo/，两者不冲突。
+    location /v1/ {
+        auth_basic           "consul demo";
+        auth_basic_user_file "$dir/consul-demo.htpasswd";
+
+        proxy_pass           http://$CONSUL_ADDR;
+        proxy_http_version   1.1;
+        proxy_set_header     Host              \$host;
+        proxy_read_timeout   330s;
+        proxy_buffering      off;
+    }
+EOF
+  fi
+
+  echo "}" >> "$dir/consul-demo.conf"
   chmod 644 "$dir/consul-demo.conf"
+}
+
+# 生成 nginx 认的密码文件（apr1 摘要，一行「用户名:密文」）。
+# 同样的用户名+密码每次算出的密文一致（salt 由它们自己推出来），
+# 所以可以直接比对文件内容：没改就不重写，避免每次都触发 reload。
+# 返回：0 = 已就绪；1 = config.ini 里没配密码（不需要这个文件）
+ensure_htpasswd() {
+  local dir="${1:-$NGINX_CONF_DIR}"
+  local file="$dir/consul-demo.htpasswd"
+  [ -n "$CONSUL_LOGIN_PASS" ] || return 1
+
+  mkdir -p "$dir"
+  if ! command -v openssl >/dev/null 2>&1; then
+    say "    [注意] 系统里没有 openssl，生成不了密码文件。"
+    say "           装一个：sudo apt install -y openssl，然后重跑本命令。"
+    return 0
+  fi
+
+  local salt hash want cur
+  salt="$(printf '%s:%s' "$CONSUL_LOGIN_USER" "$CONSUL_LOGIN_PASS" | md5sum 2>/dev/null | cut -c1-8)"
+  [ -n "$salt" ] || salt="consuldemo"
+  hash="$(openssl passwd -apr1 -salt "$salt" "$CONSUL_LOGIN_PASS")"
+  want="$CONSUL_LOGIN_USER:$hash"
+  cur="$(cat "$file" 2>/dev/null || true)"
+
+  if [ "$cur" = "$want" ]; then
+    say "    访问密码    已就绪       $file（用户名 $CONSUL_LOGIN_USER）"
+  else
+    printf '%s\n' "$want" > "$file"
+    chmod 644 "$file"
+    say "    访问密码    已生成       $file（用户名 $CONSUL_LOGIN_USER）"
+  fi
+  return 0
 }
 
 # 目标目录里缺哪个补哪个
@@ -457,6 +541,30 @@ ensure_nginx_files() {
   else
     generate_site_conf "$dir"
     say "    站点配置    已生成       $dir/consul-demo.conf（listen $SITE_PORT → $SERVICE_NAME）"
+  fi
+
+  # 管理界面的密码文件。配了密码才有，没配就明说没开，避免他到处找入口。
+  if ensure_htpasswd "$dir"; then
+    :
+  else
+    say "    管理界面    未启用       config.ini 里 CONSUL_LOGIN_PASS 留空"
+    say "                要开的话填上密码，再删掉 $dir/consul-demo.conf 重跑本命令"
+  fi
+
+  # 密码文件放在用户家目录下的 conf.d 时，nginx 的工作进程（通常 www-data）
+  # 可能连目录都进不去，认证会一直 403，而 nginx -t 照样通过。
+  if [ -n "$CONSUL_LOGIN_PASS" ] && [ -f "$dir/consul-demo.htpasswd" ] \
+     && command -v runuser >/dev/null 2>&1; then
+    local u
+    for u in www-data nginx; do
+      if id "$u" >/dev/null 2>&1; then
+        runuser -u "$u" -- test -r "$dir/consul-demo.htpasswd" 2>/dev/null \
+          || say "    [注意] nginx 运行用户 $u 读不到 $dir/consul-demo.htpasswd，
+           认证会一直 403。把这个文件放到 $u 能读到的地方，
+           或者把 NGINX_CONF_DIR 指到 /etc/nginx/conf.d 这类目录。"
+        break
+      fi
+    done
   fi
 
   if [ -f "$dir/backends.conf" ]; then

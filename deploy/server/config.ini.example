@@ -42,3 +42,19 @@ NGINX_CONF_DIR=
 #   应用注册到注册中心时用的名字，也是 nginx 找后端的依据。
 #   多套环境共用一台注册中心时才需要改。
 SERVICE_NAME=consul-demo
+
+# ---------- Consul 管理界面（挂在站点的 /consul/ 下） ----------
+#   开了之后，浏览器访问 http://<站点地址>:SITE_PORT/consul/ 就能看实例列表，
+#   但要先输入用户名密码。凭证写在这里，脚本会生成 nginx 认的密码文件，
+#   不需要你手动执行 htpasswd。
+#
+#   密码留空 = 站点上不暴露管理界面（注册中心自己照常在跑，只是外面访问不到）。
+#   改完用户名或密码：删掉 conf.d 里的 consul-demo.htpasswd 再重跑 ./deploy.sh gateway。
+CONSUL_LOGIN_USER=admin
+CONSUL_LOGIN_PASS=
+
+# ---------- 注册中心地址（nginx 反代管理界面用） ----------
+#   注册中心和网关在同一台：127.0.0.1:8500
+#   在别的机器：填那台的 IP:8500。只写 IP，不要写域名——
+#   nginx 启动时就要解析它，写错名字会直接起不来。
+CONSUL_ADDR=127.0.0.1:8500

@@ -23,6 +23,9 @@ services:
       - -advertise=${MY_IP}
       - -client=0.0.0.0      # 对外开放 8500，让其它机器能来注册
       - -ui
+      # 管理界面挂在 /consul/ 而不是默认的 /ui/：
+      # 站点那边按同一个子路径反代（带密码），两边的路径必须一致。
+      - -ui-content-path=/consul/
     volumes:
       # 数据落在本角色目录下的 data/center，删容器不丢注册记录；脚本会 chmod 777
       - ./data/center:/consul/data

@@ -130,3 +130,25 @@ cat <<EOF
   curl -s 'http://$(detect_ip):$SITE_PORT/api/demo/v1/test?name=hello'
 
 EOF
+
+if [ -n "$CONSUL_LOGIN_PASS" ]; then
+  cat <<EOF
+管理界面（要密码）：
+
+  地址        http://$(detect_ip):$SITE_PORT$CONSUL_UI_PATH
+  用户名      $CONSUL_LOGIN_USER
+  密码        config.ini 里的 CONSUL_LOGIN_PASS
+  密码文件    $NGINX_CONF_DIR/consul-demo.htpasswd
+
+  改用户名/密码：改 config.ini，删掉上面那个密码文件，重跑本命令。
+
+EOF
+else
+  cat <<EOF
+管理界面没开：config.ini 里 CONSUL_LOGIN_PASS 是空的，站点上不暴露 /consul/。
+要开就填个密码，删掉站点配置后重跑本命令：
+
+  rm $NGINX_CONF_DIR/consul-demo.conf
+
+EOF
+fi

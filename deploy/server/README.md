@@ -91,7 +91,39 @@ NGINX_CONF_DIR=
 
 # 服务名
 SERVICE_NAME=consul-demo
+
+# Consul 管理界面的登录用户（界面挂在站点的 /consul/ 下）
+CONSUL_LOGIN_USER=admin
+
+# 登录密码。留空 = 站点上不暴露管理界面
+CONSUL_LOGIN_PASS=
+
+# 注册中心地址，nginx 反代管理界面时用。同机填 127.0.0.1:8500
+CONSUL_ADDR=127.0.0.1:8500
 ```
+
+### Consul 管理界面：/consul/ 子路径 + 密码
+
+管理界面不单独开端口，直接挂在站点上：
+
+| 项 | 值 |
+|---|---|
+| 地址 | `http://<站点地址>:SITE_PORT/consul/` |
+| 用户名 | `config.ini` 的 `CONSUL_LOGIN_USER` |
+| 密码 | `config.ini` 的 `CONSUL_LOGIN_PASS` |
+| 密码文件 | `<NGINX_CONF_DIR>/consul-demo.htpasswd`（脚本生成，不用你 htpasswd） |
+
+三条边界说清楚：
+
+1. **密码留空就不开这个入口** —— 站点上没有 `/consul/`，注册中心照常运行，外面访问不到，避免把没鉴权的 Consul 暴露出去。
+2. **业务接口不受影响** —— 只有 `/consul/` 和 `/v1/` 要密码，`/api/demo/` 仍然免密码。
+3. **改用户名/密码**：改 `config.ini` → 删掉 `consul-demo.htpasswd` → 重跑 `./deploy.sh gateway`。
+
+> 为什么还要拦 `/v1/`：界面里的接口调用写死成根路径，不拦就等于没拦。
+>
+> 密码文件放在用户家目录下的 `conf.d` 里时，nginx 工作进程（通常 `www-data`）可能读不到，
+> 表现是输入正确密码也一直 403，而 `nginx -t` 照样通过。脚本会检查并提醒，
+> 遇到就换到 `/etc/nginx/conf.d` 这类目录。
 
 > `config.ini` 只影响本机，不会同步到别的机器。加机器时那份 `config.ini` 是新生成的，要单独改 `REGISTRY`。
 
@@ -120,7 +152,8 @@ SERVICE_NAME=consul-demo
 
 | 文件 | 缺了会怎样 | 补的方式 |
 |---|---|---|
-| `consul-demo.conf` | nginx 没有站点配置，`proxy_pass` 无从上手 | 按 `SITE_PORT` / `SERVICE_NAME` 生成一份 |
+| `consul-demo.conf` | nginx 没有站点配置，`proxy_pass` 无从上手 | 按 `SITE_PORT` / `SERVICE_NAME` / `CONSUL_*` 生成一份 |
+| `consul-demo.htpasswd` | 管理界面输入正确密码也一直 401/403 | 按 `CONSUL_LOGIN_USER` / `CONSUL_LOGIN_PASS` 生成；内容没变就不重写 |
 | `backends.conf` | **`nginx -t` 照样通过**，但 `proxy_pass http://consul-demo/` 会被当成域名去解析，请求 502 或者莫名打到别的主机上——实测最容易误判的一类 | 先查注册中心；没有实例就写一条 `down` 占位（能过 `-t`、请求返回 502），generator 起来后接管 |
 
 ---
@@ -194,8 +227,11 @@ sudo ./deploy.sh service
 | 2 | `curl -s localhost:8500/v1/status/leader` | `"<本机内网IP>:8300"` |
 | 3 | `curl -s localhost:8500/v1/catalog/service/consul-demo` | 地址是内网 IP，**不是 127.0.0.1** |
 | 4 | `cat $NGINX_CONF_DIR/backends.conf`（`deploy.sh gateway` 会打印实际路径） | 每台业务机一行 `server` |
-| 5 | `curl -s "http://<本机IP>:8088/api/demo/v1/test?name=x"` | `hello:x` |
-| 6 | 加一台业务机后看 `backends.conf` 和 `docker logs consul-demo-generator` | 自动多一行，日志里出现 `[reload] 已通知 nginx 平滑重载` |
+| 5 | `curl -s "http://<本机IP>:8088/api/demo/v1/test?name=x"` | `hello:x`（**不需要密码**） |
+| 6 | `curl -s -o /dev/null -w '%{http_code}' http://<本机IP>:8088/consul/` | `401`（没带密码，应被挡） |
+| 7 | `curl -s -u 用户名:密码 http://<本机IP>:8088/consul/ \| head -3` | 返回 Consul UI 的 HTML |
+| 8 | `curl -s -u 用户名:密码 http://<本机IP>:8088/v1/status/leader` | 与第 2 步相同，说明界面能取到数据 |
+| 9 | 加一台业务机后看 `backends.conf` 和 `docker logs consul-demo-generator` | 自动多一行，日志里出现 `[reload] 已通知 nginx 平滑重载` |
 
 ---
 
@@ -230,12 +266,13 @@ sudo ./deploy.sh service
 ```
 ~/server                  部署目录（deploy.sh 在这里）
 ~/nginx/conf.d/           include 目录
-  ├── consul-demo.conf         缺了自动生成（listen 8088 + proxy_pass）
+  ├── consul-demo.conf         缺了自动生成（listen 8088 + /api/demo/ + /consul/）
+  ├── consul-demo.htpasswd     配了 CONSUL_LOGIN_PASS 才有，管理界面的登录凭证
   └── backends.conf            缺了自动补，之后由 generator 持续重写
 ```
 
-两个文件都在同一个目录里，nginx 一次 include 全读到。想要**手动版本**的站点配置，
-仓库根 `nginx/consul-demo.conf` 就是默认值样品，`cp` 过去即可；只要目标文件已存在，
+三个文件都在同一个目录里，nginx 一次 include 全读到（`.htpasswd` 不是 `.conf` 结尾，不会被当成配置加载）。
+想要**手动版本**的站点配置，仓库根 `nginx/consul-demo.conf` 就是默认值样品，`cp` 过去即可；只要目标文件已存在，
 脚本不会再覆盖。
 
 **为什么会有「启动了没 reload」这种坑**：`nginx -t` 是纯语法检查，永远能通过；

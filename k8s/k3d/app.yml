@@ -1,0 +1,116 @@
+# ============================================================
+#  consul-demo 在单机 k3d 上的部署清单
+#
+#  与 ../app.yml（3 台独立 VM 的 k3s）的差别只有一处：
+#    externalTrafficPolicy: Local → Cluster
+#
+#  原因：k3d 的端口映射 -p 8081:30080@loadbalancer 是把 serverlb 的流量
+#  转到 **server 节点** 的 30080，而 server 节点默认带 NoSchedule 污点、
+#  上面没有 Pod。Local 模式下 server 的 30080 会直接拒绝连接，整条链路断掉。
+#  Cluster 模式下 kube-proxy 会把请求 DNAT 到任意节点的 Pod（都在同一个
+#  docker 网络里，跨节点开销可以忽略）。
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consul-demo
+  labels:
+    app: consul-demo
+spec:
+  replicas: 3
+
+  # 零中断三件套之一：先起新的，等就绪，再删旧的
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
+  selector:
+    matchLabels:
+      app: consul-demo
+
+  template:
+    metadata:
+      labels:
+        app: consul-demo
+    spec:
+      terminationGracePeriodSeconds: 30
+
+      # 单机 k3d 只有 2 个可调度节点（server 带污点），3 副本会是 2-1。
+      # matchLabelKeys 仍然要留：它让 maxSkew 只统计同一批新 Pod，
+      # 否则旧 Pod 占名额，约束形同虚设。
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          matchLabelKeys: [pod-template-hash]
+          labelSelector:
+            matchLabels:
+              app: consul-demo
+
+      containers:
+        - name: app
+          image: wttcvs/consul-demo:v20261022-172323
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3020
+
+          env:
+            - {name: PORT, value: "3020"}
+            - {name: HOST, value: "0.0.0.0"}
+            - {name: LOG_LEVEL, value: "info"}
+
+          # failureThreshold 从 2 放宽到 3：单机上 3 个 node 容器 + 业务容器
+          # 共享 CPU，滚动更新时新旧 Pod 并存，探针容易因为瞬时抢占误判。
+          readinessProbe:
+            httpGet: {path: /healthz, port: 3020}
+            periodSeconds: 2
+            failureThreshold: 3
+            timeoutSeconds: 2
+
+          livenessProbe:
+            httpGet: {path: /healthz, port: 3020}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          # 摘 Endpoints 和发 SIGTERM 是同时的，先睡 5 秒让规则下发完
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 5"]
+
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: consul-demo
+spec:
+  type: NodePort
+
+  # 单机 k3d 必须用 Cluster，理由见文件头
+  externalTrafficPolicy: Cluster
+
+  selector:
+    app: consul-demo
+  ports:
+    - port: 80
+      targetPort: 3020
+      nodePort: 30080
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: consul-demo
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: consul-demo

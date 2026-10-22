@@ -38,6 +38,7 @@ deploy-consul-demo/
 ├── roles/
 │   ├── center/      注册中心
 │   ├── gateway/     网关（生成 backends.conf 到 nginx 的配置目录）
+│   ├── agent/       本机客户端（每台业务机一个，service 会自动带上）
 │   └── service/     业务应用
 └── image/           应用镜像包
 ```
@@ -54,7 +55,8 @@ deploy-consul-demo/
 |---|---|---|---|
 | `sudo ./deploy.sh center` | 注册中心 | 挑一台固定的 | 一次，以后不用管 |
 | `sudo ./deploy.sh gateway` | 地址表生成器（转发由该机的 nginx 做） | 装 nginx 的那台 | 一次 |
-| `sudo ./deploy.sh service` | 业务应用 | 每台业务机 | 每台一次 |
+| `sudo ./deploy.sh service` | 业务应用（自动带上本机客户端） | 每台业务机 | 每台一次 |
+| `sudo ./deploy.sh agent` | 本机客户端 | 每台业务机 | service 已代劳，单独执行只用于排查 |
 | `sudo ./deploy.sh all` | 三块装同一台 | 单机演示 | 一次 |
 | `./deploy.sh status` | 看当前机器装了什么 | 任意 | 随时 |
 | `./deploy.sh init` | 只生成 `config.ini`，不装任何东西 | 任意 | 可选 |
@@ -199,6 +201,17 @@ sudo ./deploy.sh gateway
 sed -i 's|^REGISTRY=.*|REGISTRY=http://第一台的内网IP:8500|' config.ini
 sudo ./deploy.sh service
 ```
+
+`service` 会先在这台起一个本机客户端（`consul-demo-agent`），再让应用注册到它。
+
+**为什么必须有这一层**：注册中心里一条服务的主键是「节点名 + 实例 ID」。
+如果各台机器都直接往注册中心那台的 agent 上注册，所有实例就都挂在同一个节点名下，
+同名同端口的实例会互相覆盖——第二台机器装完，注册中心里还是只有一台。
+加了本机客户端之后，每台机器在注册中心里是独立节点，同 ID 也不冲突。
+
+节点名默认 `<服务名>-<本机IP>`，比如 `consul-demo-10.0.3.8`。
+几台机器的 hostname 相同时（克隆出来的机器往往是），靠的就是这个默认值区分；
+想自己命名就填 `config.ini` 里的 `NODE_NAME`。
 
 不用回第一台做任何事：新实例报到后，第一台的 generator 会在 1~2 秒内重写地址表，
 然后自己给 nginx 发 HUP 平滑重载，流量立刻分到两台。

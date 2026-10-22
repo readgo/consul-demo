@@ -26,13 +26,20 @@ export APP_PORT="$PORT"
 export MY_IP="$(detect_ip)"
 export REGISTRY SERVICE_NAME
 
-step "1/4 准备"
+step "1/5 准备"
 say "    本机地址    $MY_IP"
+say "    节点名      $(node_name)"
 say "    应用端口    $PORT"
 say "    实例名      $INSTANCE_ID"
 say "    注册中心    $REGISTRY"
 
-step "2/4 检查能不能连上注册中心"
+# 应用注册到本机 agent，所以先把 agent 备好。
+# 少了这一步，所有机器都会直接往注册中心那台的 agent 上注册，
+# 结果全挤在同一个节点名下，同名实例互相覆盖。
+step "2/5 本机客户端"
+ensure_local_agent
+
+step "3/5 检查能不能连上注册中心"
 registry_reachable || die "连不上注册中心 $REGISTRY（地址或端口不通）。
      - 注册中心在别的机器：本机 config.ini 里的 REGISTRY 要填那台的内网地址
      - 注册中心就在本机：先执行 ./deploy.sh center
@@ -45,7 +52,7 @@ if docker ps -a --format '{{.Names}}' | grep -qx "$INSTANCE_ID"; then
   docker rm -f "$INSTANCE_ID" >/dev/null
 fi
 
-step "3/4 导入镜像并启动"
+step "4/5 导入镜像并启动"
 # 镜像包只需导入一次；本机已有就跳过，避免每次几十秒
 if ! docker image inspect consul-demo:local >/dev/null 2>&1; then
   [ -f "$ROOT/image/consul-demo-image.tar.gz" ] \
@@ -57,14 +64,17 @@ fi
 
 docker compose up -d --quiet-pull --no-build
 
-step "4/4 等它报到"
-if wait_instances "$SERVICE_NAME" 1; then
+step "5/5 等它报到"
+# 等的是「自己这一条」，不是数量。只数数量的话，别的机器报的同名实例
+# 就能让这里误判成功，然后打印一句"已报到"，实际自己没注册上。
+if wait_self "$SERVICE_NAME" "$INSTANCE_ID"; then
   say "    已报到。注册中心现在有这些实例："
   curl -fsS "$REGISTRY/v1/catalog/service/$SERVICE_NAME" 2>/dev/null \
     | grep -oE '"ServiceID":"[^"]*"|"ServiceAddress":"[^"]*"|"ServicePort":[0-9]*' \
     | sed 's/^/      /'
 else
-  say "    [注意] 没等到报到，看日志：docker logs $INSTANCE_ID --tail 40"
+  say "    [注意] 30 秒内没等到 $INSTANCE_ID 报到，看日志：docker logs $INSTANCE_ID --tail 40"
+  exit 1
 fi
 
 # 不在这里碰 nginx：地址表由网关那台的 generator 重写并自己发 HUP，

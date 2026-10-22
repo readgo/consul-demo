@@ -21,6 +21,9 @@ services:
       PORT: ${APP_PORT}
       HOST: 0.0.0.0
       ADVERTISE_HOST: ${MY_IP}                 # 报给别人的地址，不能是 0.0.0.0
-      CONSUL_HTTP_ADDR: ${REGISTRY}
+      # 注册到本机的 agent，不是直接注册到注册中心。
+      # 直连注册中心的话，所有机器的实例都会挂在同一个节点名下，
+      # 同名同端口的实例互相覆盖，第二台机器永远显不出来。
+      CONSUL_HTTP_ADDR: ${CONSUL_AGENT_ADDR}
       INSTANCE_ID: ${INSTANCE_ID}              # 带端口，同机多实例才不互相覆盖
       SERVICE_NAME: ${SERVICE_NAME}

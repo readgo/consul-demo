@@ -61,9 +61,14 @@ MY_IP="${MY_IP:-}"
 APP_PORT="${APP_PORT:-3020}"
 SITE_PORT="${SITE_PORT:-8088}"
 SERVICE_NAME="${SERVICE_NAME:-consul-demo}"
+# 本机在集群里的节点名。留空 = 服务名-本机地址（见 node_name）。
+# 几台机器 hostname 相同时，只有它能把它们区分开。
+NODE_NAME="${NODE_NAME:-}"
+# 业务应用注册到哪：永远是本机的 agent，不是注册中心（见 roles/agent）。
+CONSUL_AGENT_ADDR="http://127.0.0.1:8500"
 # 这几个要给 docker compose 做变量替换，必须显式导出：
 # config.ini 里没写某一项时，上面的兜底赋值不会自动带上 export 属性。
-export REGISTRY MY_IP APP_PORT SITE_PORT SERVICE_NAME
+export REGISTRY MY_IP APP_PORT SITE_PORT SERVICE_NAME NODE_NAME CONSUL_AGENT_ADDR
 
 # ---------- Consul 管理界面（挂在站点的子路径下，要密码）----------
 # 界面路径固定 /consul/，注册中心启动时就按这个路径提供，nginx 原样转发。
@@ -282,6 +287,33 @@ registry_is_local() {
   esac
 }
 
+# 注册中心那台的地址，不带端口。给 agent 的 -retry-join 用（默认走 8301）。
+registry_host() {
+  printf '%s' "${REGISTRY_HOSTPORT%:*}"
+}
+
+# 注册中心就在本机：回环地址，或者填的就是本机地址。
+# 这种情况不用装客户端 agent —— server 自带一个。
+registry_is_self() {
+  local host
+  host="$(registry_host)"
+  case "$host" in
+    127.0.0.1|localhost) return 0 ;;
+  esac
+  [ "$host" = "$(detect_ip)" ] && return 0
+  return 1
+}
+
+# 本机在集群里的节点名。默认「服务名-本机地址」，一眼能看出是哪台；
+# 填了 NODE_NAME 就用填的。
+node_name() {
+  if [ -n "$NODE_NAME" ]; then
+    printf '%s' "$NODE_NAME"
+    return
+  fi
+  printf '%s-%s' "$SERVICE_NAME" "$(detect_ip)"
+}
+
 # ---------- 等待 ----------
 # 注册中心能不能连（快查，3 秒内给结论）。
 # 用来把「地址填错了」和「已经起来了但还在选主」区分开：
@@ -313,6 +345,75 @@ wait_instances() {
     sleep 1
   done
   return 1
+}
+
+# 等本机 agent 联上集群（参数：最多等几秒）。
+# 判据是它报得出集群 leader：容器 Up 不代表已经 join 成功，
+# -retry-join 还在重试的时候容器也是 Up。
+wait_local_agent() {
+  local max="${1:-25}" i
+  for i in $(seq 1 "$max"); do
+    curl -fsS "$CONSUL_AGENT_ADDR/v1/status/leader" 2>/dev/null | grep -q ':8300' && return 0
+    sleep 1
+  done
+  return 1
+}
+
+# 等「自己的这一条」出现在注册中心目录里（参数：服务名，自己的实例 ID）。
+# 不能只数数量：目录里本来就可能有别人报的同名实例，数量够了但自己其实
+# 没注册上，只看数量会给出假的成功提示。
+wait_self() {
+  local name="$1" id="$2" max="${3:-30}" i
+  for i in $(seq 1 "$max"); do
+    if curl -fsS "$REGISTRY/v1/catalog/service/$name" 2>/dev/null \
+       | grep -Fq "\"ServiceID\":\"$id\""; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+# ---------- 角色协作 ----------
+# 确保本机有一个可用的 agent：
+#   注册中心在本机 → server 自带 agent，不用动
+#   其它机器       → 起一个 client 模式的 agent（幂等，已在跑就不动）
+ensure_local_agent() {
+  if registry_is_self; then
+    say "    注册中心在本机，直接用它的 agent"
+    return 0
+  fi
+
+  if curl -fsS --max-time 2 "$CONSUL_AGENT_ADDR/v1/status/leader" 2>/dev/null | grep -q ':8300'; then
+    say "    本机客户端已在跑（$(node_name)）"
+    return 0
+  fi
+
+  local dir="$ROOT/roles/agent"
+  [ -f "$dir/compose.yaml" ] || die "找不到本机客户端的编排文件：$dir/compose.yaml"
+
+  registry_reachable || die "连不上注册中心 $REGISTRY（地址或端口不通）。
+     - 本机 config.ini 里的 REGISTRY 要填注册中心那台的内网地址
+     - 检查那边防火墙有没有放开 8500 和 8301"
+
+  say "    启动本机客户端（节点名 $(node_name)）"
+  (
+    cd "$dir"
+    mkdir -p data/agent
+    chmod 777 data/agent
+    export REGISTRY_HOST="$(registry_host)"
+    export MY_IP="$(detect_ip)"
+    export NODE_NAME="$(node_name)"
+    docker compose up -d --quiet-pull --no-build
+  ) || die "本机客户端启动失败，看日志：docker logs consul-demo-agent --tail 40"
+
+  if wait_local_agent 25; then
+    say "    客户端已加入集群"
+  else
+    die "本机客户端起来了，但没连上注册中心。
+     - 确认 $(registry_host) 的 8301 端口从本机能通
+     - 看日志：docker logs consul-demo-agent --tail 40"
+  fi
 }
 
 # 等后端地址列表被写出来。

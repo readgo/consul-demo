@@ -19,7 +19,11 @@ deploy/server/VERSION.txt
 
 # 运行时数据 / 渲染产物，每台机器自己产生
 deploy/server/roles/center/data/
+deploy/server/roles/agent/data/
 deploy/server/roles/gateway/conf.d/
 
 # 本地工作记忆：含内网地址、主机名、排查草稿，不进仓库
 .workbuddy/
+
+# 本机删除文件时的回收站（部分环境把 rm 重定向到这里）
+.Trash-0/

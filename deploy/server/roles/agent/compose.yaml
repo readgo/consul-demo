@@ -1,0 +1,35 @@
+# 角色：本机客户端（consul agent，client 模式）
+#
+# 每台「业务机」跑一个。应用注册到它，它再把注册信息同步给注册中心。
+# 注册中心那台不需要它——server 自带一个 agent。
+#
+# 为什么要有这一层：注册中心的 service 主键是「节点名 + 实例 ID」。
+# 如果每台机器都把服务直接注册到注册中心那台的 agent 上，所有实例就都
+# 挂在同一个节点名下，同名同端口的实例会互相覆盖，第二台机器永远显不出来。
+#
+# 端口都用宿主网络：serf 要互相 gossip（8301），走容器网络外面连不进来。
+name: consul-demo-agent
+
+services:
+  agent:
+    image: hashicorp/consul:1.20
+    container_name: consul-demo-agent
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - agent
+      # 节点名必须由脚本显式传：agent 默认拿 hostname 当节点名，
+      # 几台机器 hostname 相同（克隆出来的机器往往一样）就会撞成一个节点。
+      - -node=${NODE_NAME}
+      # 本机地址，注册中心和别的机器靠它回连
+      - -advertise=${MY_IP}
+      - -bind=0.0.0.0
+      # HTTP/DNS 只给本机应用用，不对外暴露
+      - -client=127.0.0.1
+      # 主动加入注册中心（默认走它的 8301）。连不上就一直重试，
+      # 所以注册中心先起后起、中途重启都不影响这台。
+      - -retry-join=${REGISTRY_HOST}
+      - -data-dir=/consul/data
+      - -log-level=warn
+    volumes:
+      - ./data/agent:/consul/data

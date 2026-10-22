@@ -5,6 +5,8 @@
 #    sudo ./deploy.sh center     注册中心   一台机器装一次，之后永远不用管
 #    sudo ./deploy.sh gateway    网关机     装 nginx 的那台（含地址表生成器）
 #    sudo ./deploy.sh service    业务应用   每台业务机各装一次
+#    sudo ./deploy.sh agent      业务机     本机客户端；service 会自动装它，
+#                                           单独执行只在排查时用
 #
 #    sudo ./deploy.sh all        三块装在同一台（单机演示用）
 #    sudo ./deploy.sh status     看当前机器上跑着什么
@@ -45,6 +47,9 @@ case "$cmd" in
   service)
     exec bash "$ROOT/roles/service/run.sh" "${1:-1}"
     ;;
+  agent)
+    exec bash "$ROOT/roles/agent/run.sh"
+    ;;
   all)
     say "==== 单机演示：三块装在同一台 ===="
     # 顺序有讲究：先有注册中心，应用才报得了到；先有应用，网关才生得出地址列表
@@ -66,6 +71,9 @@ case "$cmd" in
 
     say "网关"
     show_one consul-demo-generator "（本机没装）"
+
+    say "本机客户端"
+    show_one consul-demo-agent "（本机没装，或本机就是注册中心）"
 
     say "业务应用"
     # 只认「服务名-纯数字」，避免把注册中心/网关的容器名也算进来
@@ -98,7 +106,7 @@ case "$cmd" in
     say "要改哪一项就编辑这个文件，然后执行对应的部署命令："
     say "  sudo ./deploy.sh center     装注册中心"
     say "  sudo ./deploy.sh gateway    装网关"
-    say "  sudo ./deploy.sh service    装业务应用"
+    say "  sudo ./deploy.sh service    装业务应用（会自动带上本机客户端）"
     say "  sudo ./deploy.sh all        三块装同一台"
     ;;
   ''|-h|--help|help)

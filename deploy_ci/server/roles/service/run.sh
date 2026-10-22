@@ -29,21 +29,28 @@ export APP_PORT="$PORT"
 export MY_IP="$(detect_ip)"
 export REGISTRY SERVICE_NAME IMAGE_REF
 
-step "1/5 准备"
+step "1/6 准备"
 say "    镜像        $IMAGE_REF"
 say "    本机地址    $MY_IP"
+say "    节点名      $(node_name)"
 say "    应用端口    $PORT"
 say "    实例名      $INSTANCE_ID"
 say "    注册中心    $REGISTRY"
 
-step "2/5 检查能不能连上注册中心"
+# 应用注册到本机 agent，所以先把 agent 备好。
+# 少了这一步，所有机器都会直接往注册中心那台的 agent 上注册，
+# 结果全挤在同一个节点名下，同名实例互相覆盖。
+step "2/6 本机客户端"
+ensure_local_agent
+
+step "3/6 检查能不能连上注册中心"
 registry_reachable || die "连不上注册中心 $REGISTRY（地址或端口不通）。
      - 注册中心在别的机器：本机 config.ini 里的 REGISTRY 要填那台的内网地址
      - 注册中心就在本机：先执行 ./deploy.sh center
      - 地址没错但连不上：检查那边防火墙有没有放开 8500"
 wait_registry || die "注册中心 $REGISTRY 能连上，但还没准备好（可能在选主）。等 30 秒再试一次。"
 
-step "3/5 拉镜像"
+step "4/6 拉镜像"
 # 记住旧容器用的镜像，重启后能说清「换版本前是哪个」
 OLD_REF=""
 if docker ps -a --format '{{.Names}}' | grep -qx "$INSTANCE_ID"; then
@@ -52,7 +59,7 @@ if docker ps -a --format '{{.Names}}' | grep -qx "$INSTANCE_ID"; then
 fi
 pull_image "$IMAGE_REF"
 
-step "4/5 启动"
+step "5/6 启动"
 # 同一台机器重复执行时，先把同名容器清掉（换端口、换版本都要重建）
 if docker ps -a --format '{{.Names}}' | grep -qx "$INSTANCE_ID"; then
   say "    清理同名旧容器 $INSTANCE_ID"
@@ -60,14 +67,17 @@ if docker ps -a --format '{{.Names}}' | grep -qx "$INSTANCE_ID"; then
 fi
 docker compose up -d --quiet-pull --no-build
 
-step "5/5 等它报到"
-if wait_instances "$SERVICE_NAME" 1; then
+step "6/6 等它报到"
+# 等的是「自己这一条」，不是数量。只数数量的话，别的机器报的同名实例
+# 就能让这里误判成功，然后打印一句"已报到"，实际自己没注册上。
+if wait_self "$SERVICE_NAME" "$INSTANCE_ID"; then
   say "    已报到。注册中心现在有这些实例："
   curl -fsS "$REGISTRY/v1/catalog/service/$SERVICE_NAME" 2>/dev/null \
     | grep -oE '"ServiceID":"[^"]*"|"ServiceAddress":"[^"]*"|"ServicePort":[0-9]*' \
     | sed 's/^/      /'
 else
-  say "    [注意] 没等到报到，看日志：docker logs $INSTANCE_ID --tail 40"
+  say "    [注意] 30 秒内没等到 $INSTANCE_ID 报到，看日志：docker logs $INSTANCE_ID --tail 40"
+  exit 1
 fi
 
 if [ -n "$OLD_REF" ] && [ "$OLD_REF" != "$IMAGE_REF" ]; then

@@ -1,0 +1,137 @@
+# ============================================================
+#  consul-demo 在 k3s 上的部署清单
+#
+#  用法：
+#    kubectl apply -f k8s/app.yml
+#    kubectl rollout status deployment/consul-demo
+#
+#  发版（不动这个文件，直接改镜像）：
+#    kubectl set image deployment/consul-demo app=wttcvs/consul-demo:<新tag>
+#
+#  回滚：
+#    kubectl rollout undo deployment/consul-demo
+#
+#  这个文件只管「什么样」，不管「怎么发布」。镜像 tag 写死是为了首次部署
+#  能一步到位；后续发版走 set image，改完记得同步这里的 tag，否则下次
+#  apply 会把版本退回去。
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consul-demo
+  labels:
+    app: consul-demo
+spec:
+  replicas: 3
+
+  # 零中断的关键：先起新的，等它就绪，再删旧的
+  #   maxSurge: 1        允许临时多一个（3 → 4），给新版本腾位置
+  #   maxUnavailable: 0  任何时刻可用副本都不少于 replicas，一个都不许提前删
+  # 副作用（好的那种）：新版本起不来时发布会卡住，旧版本继续服务，
+  # 不会出现「发一半把线上弄挂」。
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
+  selector:
+    matchLabels:
+      app: consul-demo
+
+  template:
+    metadata:
+      labels:
+        app: consul-demo
+    spec:
+      # 给优雅关闭留的总时间。preStop 的 5 秒 + 应用 close 的时间都算在里面，
+      # 超时会被 SIGKILL 强杀，所以不能比实际关闭耗时长太多，也不能太短。
+      terminationGracePeriodSeconds: 30
+
+      # 三个副本铺到三台节点上，每台一个。关掉任意一台还有两个在跑。
+      #   whenUnsatisfiable 必须是 ScheduleAnyway：
+      #   用 DoNotSchedule 时，滚动更新多出来的第 4 个 Pod 无处可放，
+      #   会一直 Pending，发布直接卡死。
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: consul-demo
+
+      containers:
+        # 容器名 app 是 kubectl set image 的定位依据，不要改名
+        - name: app
+          image: wttcvs/consul-demo:v20261022-164849
+          # 用明确的版本 tag，不用 latest。latest 配 IfNotPresent 时，
+          # 重新推同一个 tag 集群不会去拉新的，会出现「以为发了其实没发」。
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3020
+
+          # CONSUL_HTTP_ADDR 故意不设：空值让 consulEnabled = false
+          # （src/config.ts:41），应用跳过注册，服务发现交给 k8s 的 Endpoints。
+          env:
+            - {name: PORT, value: "3020"}
+            - {name: HOST, value: "0.0.0.0"}
+            - {name: LOG_LEVEL, value: "info"}
+
+          # readiness 决定「什么时候开始接流量」，失败就从 Endpoints 摘掉。
+          # periodSeconds 2 是为了让新 Pod 尽快被判定可用，缩短发布耗时。
+          readinessProbe:
+            httpGet: {path: /healthz, port: 3020}
+            periodSeconds: 2
+            failureThreshold: 2
+            timeoutSeconds: 2
+
+          # liveness 决定「什么时候重启容器」。故意放宽，
+          # 免得瞬间卡顿触发误杀——重启一次比慢几秒代价大得多。
+          livenessProbe:
+            httpGet: {path: /healthz, port: 3020}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          # 删 Pod 时 k8s 是「摘 Endpoints」和「发 SIGTERM」同时做的，
+          # kube-proxy 和 ingress 更新规则有延迟。先睡 5 秒，让流量真的
+          # 摘干净再让进程退出，否则会有 502。
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 5"]
+
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: consul-demo
+spec:
+  # NodePort：三台节点都在 30080 上监听，随便打哪台的 IP 都能通。
+  # 换成 ClusterIP 就只能集群内访问；要路径前缀（/api/demo/）得装 ingress。
+  type: NodePort
+  selector:
+    app: consul-demo
+  ports:
+    - port: 80
+      targetPort: 3020
+      nodePort: 30080
+
+---
+# Pod 中断预算：维护时（kubectl drain）保证至少有 2 个副本可用。
+# 注意边界——它只管「主动驱逐」，节点断电/关 VM 属于非自愿中断，PDB 不生效。
+# 那种场景靠的是副本分散 + Service 自动摘除，不是这个对象。
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: consul-demo
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: consul-demo

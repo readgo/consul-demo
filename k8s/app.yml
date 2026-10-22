@@ -49,13 +49,31 @@ spec:
       terminationGracePeriodSeconds: 30
 
       # 三个副本铺到三台节点上，每台一个。关掉任意一台还有两个在跑。
+      #
       #   whenUnsatisfiable 必须是 ScheduleAnyway：
       #   用 DoNotSchedule 时，滚动更新多出来的第 4 个 Pod 无处可放，
       #   会一直 Pending，发布直接卡死。
+      #
+      #   matchLabelKeys 是关键，缺了它 maxSkew 形同虚设：
+      #   PodTopologySpread 默认统计「所有匹配 label 的 Pod」——新版本和旧版本
+      #   一起算。滚动更新时旧 Pod 还占着名额，新 Pod 看到的 skew 永远刚好
+      #   等于 1（合法），于是约束不报警，选择权被交给 ImageLocality 打分，
+      #   而那个插件偏爱「本地已经有这个镜像的节点」。
+      #
+      #   实测（v20261022-172323 那次滚动，60.7MB 镜像）：
+      #     第 1 个 Pod → k3s-3，现场拉取 14.599s
+      #     第 2 个 Pod → 又是 k3s-3，"image already present on machine"，1 秒启动
+      #     第 3 个 Pod → k3s-1（k3s-3 已 2 个，再加就 skew=2 超限，被排除）
+      #   结果 2-1-0，k3s-2 一个都没分到 —— 它全程 Ready、资源全空，只是得分低。
+      #
+      #   加上 matchLabelKeys 后只统计同一个 ReplicaSet（同一次发布）的 Pod，
+      #   旧 Pod 不再占名额，新 Pod 之间强制 1-1-1。
+      #   注意：maxSurge / maxUnavailable: 0 一个字都不用改，零中断不受影响。
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
           whenUnsatisfiable: ScheduleAnyway
+          matchLabelKeys: [pod-template-hash]
           labelSelector:
             matchLabels:
               app: consul-demo
@@ -63,7 +81,7 @@ spec:
       containers:
         # 容器名 app 是 kubectl set image 的定位依据，不要改名
         - name: app
-          image: wttcvs/consul-demo:v20261022-164849
+          image: wttcvs/consul-demo:v20261022-172323
           # 用明确的版本 tag，不用 latest。latest 配 IfNotPresent 时，
           # 重新推同一个 tag 集群不会去拉新的，会出现「以为发了其实没发」。
           imagePullPolicy: IfNotPresent

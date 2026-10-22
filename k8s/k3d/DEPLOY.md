@@ -32,6 +32,7 @@ k3d 自带的 serverlb 已经承担了「把流量分到各节点」的职责。
 | `k8s/k3d/app.yml` | 任意目录，`kubectl apply -f` 用 |
 | `k8s/k3d/nginx-8080.conf` | `/etc/nginx/conf.d/consul-demo.conf` |
 | `k8s/k3d/deploy.sh` | 任意目录，`chmod +x` 后直接跑（第 9 步的一键发版） |
+| `k8s/k3d/install.sh` | 任意目录，`chmod +x` 后直接跑（第 3~5 步一次做完：建集群 + 导镜像 + 部署） |
 
 ---
 
@@ -66,6 +67,14 @@ k3d version
 判据：`k3d version v5.7.x`（≥ 5.6 即可）。
 
 ## 3. 创建集群
+
+> 第 3~5 步可以用 `./install.sh` 一次跑完（建集群 → 导镜像 → apply 部署，
+> 幂等，可重复执行）。下面保留手工步骤，用于排错和理解每一步在干什么。
+> ```bash
+> ./install.sh --dry-run     # 先看看它要做什么
+> ./install.sh               # 真跑
+> CREATE_CLUSTER=0 ./install.sh   # 集群已建好，只做导镜像 + 部署
+> ```
 
 ```bash
 k3d cluster create demo \

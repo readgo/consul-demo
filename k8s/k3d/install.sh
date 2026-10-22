@@ -60,7 +60,23 @@ run()  { if [ "$DRY_RUN" = "1" ]; then dim "（dry-run）$(printf '%q ' "$@")"; 
 step 0/7 "前置检查"
 
 for c in kubectl docker k3d curl; do
-  command -v "$c" >/dev/null 2>&1 || die "找不到 $c"
+  if ! command -v "$c" >/dev/null 2>&1; then
+    case "$c" in
+      kubectl) die "找不到 kubectl。两种装法，任选一种：
+
+      【不依赖外网】从 k3s 节点容器里取（版本与集群一致）：
+        docker cp -L k3d-$CLUSTER-server-0:/bin/kubectl /tmp/kubectl
+        sudo install -m 755 /tmp/kubectl /usr/local/bin/kubectl
+        kubectl get nodes
+
+      【官方二进制】
+        curl -LO https://dl.k8s.io/release/\$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl
+        sudo install -m 755 kubectl /usr/local/bin/kubectl" ;;
+      k3d)     die "找不到 k3d：curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash" ;;
+      docker)  die "找不到 docker：sudo apt install -y docker.io && sudo usermod -aG docker \$USER（重新登录生效）" ;;
+      *)       die "找不到 $c" ;;
+    esac
+  fi
 done
 [ -f "$MANIFEST" ] || die "找不到清单文件：$MANIFEST（用 MANIFEST=/path/app.yml 指定）"
 

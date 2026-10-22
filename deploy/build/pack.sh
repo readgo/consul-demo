@@ -63,6 +63,8 @@ REQUIRED=(
   roles/gateway/reload-nginx.sh
   roles/service/run.sh
   roles/service/compose.yaml
+  roles/agent/run.sh
+  roles/agent/compose.yaml
 )
 
 missing=0

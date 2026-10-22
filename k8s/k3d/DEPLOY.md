@@ -31,6 +31,7 @@ k3d 自带的 serverlb 已经承担了「把流量分到各节点」的职责。
 |---|---|
 | `k8s/k3d/app.yml` | 任意目录，`kubectl apply -f` 用 |
 | `k8s/k3d/nginx-8080.conf` | `/etc/nginx/conf.d/consul-demo.conf` |
+| `k8s/k3d/deploy.sh` | 任意目录，`chmod +x` 后直接跑（第 9 步的一键发版） |
 
 ---
 
@@ -91,6 +92,54 @@ kubectl get nodes -o wide
 ```
 
 三行全部 `Ready`，名字是 `k3d-demo-server-0` / `k3d-demo-agent-0` / `k3d-demo-agent-1`。
+
+### 卡在 `Starting node 'k3d-demo-tools'` 不动
+
+`k3d-demo-tools` 是 k3d 起的一个**临时**容器，只干一件事：把镜像 tar 写进
+`k3d-demo-images` 卷，供后面三个节点启动时直接加载。它跑完自己就删了。
+
+所以停在这一行，**问题不在 tools 本身，而是它依赖的两个镜像还没就绪**：
+
+| 镜像 | 大小 | 来源 |
+|---|---|---|
+| `ghcr.io/k3d-io/k3d-tools:5.7.4` | ~10 MB | ghcr.io |
+| `docker.io/rancher/k3s:v1.30.4-k3s1` | ~250 MB | Docker Hub |
+
+k3d 的日志是并发打印的，`Pulling image ...` 这行打出来只代表**开始拉**，不代表拉完。
+
+**另开一个窗口判断到底有没有在动：**
+
+```bash
+docker ps -a --filter name=k3d-demo --format 'table {{.Names}}\t{{.Status}}'
+docker images | grep -E 'k3d-tools|rancher/k3s'
+```
+
+| 看到什么 | 结论 |
+|---|---|
+| `docker images` 里两个镜像都有 | 镜像已就绪，它还在写卷，再等 30 秒 |
+| 缺 `rancher/k3s` | 正在拉 250 MB，国内常见 5~15 分钟，**继续等** |
+| 缺 `k3d-tools` | 卡在 ghcr.io（国内大概率不通），见下面「预处理」 |
+| tools 容器 `Exited` 但脚本无进展 | 真卡住，Ctrl+C 后按下面的清理重来 |
+
+**最省事的做法：手动预 pull，让拉取过程可见可控。**
+
+```bash
+docker pull ghcr.io/k3d-io/k3d-tools:5.7.4
+docker pull docker.io/rancher/k3s:v1.30.4-k3s1
+```
+
+两条都有进度条。拉完之后再执行 `k3d cluster create`，日志会在几秒内跑完。
+
+**Ctrl+C 之后要清理干净再重来**（k3d 中途失败不一定自动回收）：
+
+```bash
+k3d cluster delete demo 2>/dev/null
+docker ps -a --filter name=k3d-demo -q | xargs -r docker rm -f
+docker volume rm k3d-demo-images 2>/dev/null
+docker network rm k3d-demo 2>/dev/null
+```
+
+然后重新 `k3d cluster create`。留着半成品容器直接重试，会报名字冲突或卷被占用。
 
 ## 4. 准备镜像（这一步的顺序后面会反复用到）
 
@@ -170,7 +219,7 @@ docker pull  →  k3d image import  →  kubectl set image
 旧 Pod 因为 `maxUnavailable: 0` 一直不删，`rollout status` 卡在那里不动，
 表面上「发布没反应」，实际是镜像根本没到节点上。
 
-### 一条命令跑完
+### 一条命令跑完（手写版）
 
 ```bash
 TAG=v20261023-001122          # 换成实际 tag
@@ -182,6 +231,29 @@ docker pull wttcvs/consul-demo:$TAG \
 ```
 
 用 `&&` 串联，任一步失败就停，不会出现「import 失败但镜像已切换」的半截状态。
+
+### 一条命令跑完（脚本版，不用输 tag）
+
+`k8s/k3d/deploy.sh` 把这套流程封好了，tag 自动发现：
+
+```bash
+./k8s/k3d/deploy.sh                 # 自动找最新 tag，有更新就发
+./k8s/k3d/deploy.sh --dry-run       # 只打印将执行的命令，不动任何东西
+TAG=v20261023-001122 ./k8s/k3d/deploy.sh   # 指定 tag
+LOCAL_ONLY=1 ./k8s/k3d/deploy.sh    # 不查 Docker Hub
+```
+
+它比手写版多做了四件事：
+
+| 多做的事 | 为什么必要 |
+|---|---|
+| tag 从「本机 docker + Docker Hub」两处取最大 | 本机的才能 import；Hub 的最可能最新。只信一处都会选错 |
+| import 后**逐个节点验证**镜像真的到了 | 这是 k3d 独有的坑，`k3d image import` 返回 0 不代表每个节点都有 |
+| 任一前置步骤失败就退出，**不碰 Deployment** | 避免 `ImagePullBackOff` + `maxUnavailable: 0` 造成的发布卡死 |
+| 失败时打印未就绪 Pod 的 Events | 按 `Ready` 条件筛，不是按 `phase`——后者会漏掉最常见的「Running 但探针不过」 |
+
+对应关系：`./k8s/k3d/deploy.sh` ≈ `../deploy.sh`，两者**不能混用**。
+前者要 import，后者在 3 VM 的 k3s 上直接 set image 就行。
 
 ### 边发边验
 
@@ -268,3 +340,5 @@ k3d 的节点是容器，里面跑的是 containerd，**不共享宿主机的 do
 | `rollout status` 一直不动 | 新 Pod 起不来（多半是镜像） | `kubectl describe pod` 看 Events |
 | `k3d cluster create` 报端口占用 | 6443 或 30080 被占 | 换 `--api-port`，或先 `k3d cluster delete` |
 | 发版时偶发 502 | preStop 时间不够 | 把 `sleep 5` 调到 8~10 |
+| `create` 卡在 `Starting node 'k3d-demo-tools'` | 镜像还在拉（250 MB k3s） | 另开窗口 `docker images \| grep rancher/k3s`；建议先手动 `docker pull` 两个镜像 |
+| `create` 报容器名已存在 | 上次中途失败留下残骸 | `k3d cluster delete demo` + `docker rm -f` + `docker volume rm k3d-demo-images` |

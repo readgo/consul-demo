@@ -130,9 +130,25 @@ kind: Service
 metadata:
   name: consul-demo
 spec:
-  # NodePort：三台节点都在 30080 上监听，随便打哪台的 IP 都能通。
+  # NodePort：三台节点都在 30080 上监听。
   # 换成 ClusterIP 就只能集群内访问；要路径前缀（/api/demo/）得装 ingress。
   type: NodePort
+
+  # Local 是「前置 nginx 做秒级摘除」的前提，去掉它整条链路就失效：
+  #
+  #   Cluster（默认）—— 节点端口会把请求 DNAT 到任意一个健康 Pod。
+  #     nginx 探 10.0.3.10:30080 时，kube-proxy 可能把它转到 k3s-1 上的 Pod，
+  #     探测照样返回 200，于是 nginx 永远看不出 .10 那台已经没 Pod 了。
+  #
+  #   Local —— 节点端口只转发给「本节点」的 Pod。
+  #     于是「探 3 个节点端口」=「分别探 3 个 Pod」，任何一台出问题都能被 nginx 发现，
+  #     不必等 k8s 那 40 秒的 node-monitor-grace-period。
+  #
+  # 两条代价，都可接受：
+  #   1) 某节点没有 Pod 时，该节点端口直接连不上 —— 1-1-1 已保证每台都有
+  #   2) 客户端源 IP 被保留、不做 SNAT —— 对限流和日志反而是好事
+  externalTrafficPolicy: Local
+
   selector:
     app: consul-demo
   ports:

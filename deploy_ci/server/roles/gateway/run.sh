@@ -23,11 +23,29 @@ need_docker
 cd "$ROOT/roles/gateway"
 
 # 地址表变化后靠这个脚本让 nginx 重载。缺了它，节点增删就不会自动生效。
-# 打包清单里也校验它，这里再挡一道：文件没拷全、执行位丢了都能立刻发现。
-[ -x ./reload-nginx.sh ] || die "缺少 roles/gateway/reload-nginx.sh，或它没有执行位。
+# 打包清单里也校验它，这里再挡一道。分两种情形分别报错，一次只说一种：
+# 文件不在是一个问题，文件在但不能运行是另一个问题，给的命令也不一样。
+if [ ! -f ./reload-nginx.sh ]; then
+  die "文件不存在：roles/gateway/reload-nginx.sh
 
-    没有它，generator 写完地址表后没人通知 nginx，加节点/删节点都不会自动生效。
-    处理：重新拷一份完整的 deploy/server 目录；或 chmod +x roles/gateway/reload-nginx.sh"
+    这份 deploy/server 目录不完整，少了这个文件。没有它，地址表变了没人通知
+    nginx，加机器、删机器都不会自动生效。
+
+    处理：把完整的 deploy/server 重新拷一次（只补拷这一个文件也行），再重跑本脚本。
+    确认：ls -l roles/gateway/reload-nginx.sh   —— 能打印出这个文件就算有了"
+fi
+
+if [ ! -x ./reload-nginx.sh ]; then
+  die "文件在，但不能运行：roles/gateway/reload-nginx.sh
+
+    这是拷贝或拖拽上传时被存成了只读文件。内容没坏，补上运行权限就行。
+
+    处理：执行下面这条命令，再重跑本脚本
+
+        chmod +x roles/gateway/reload-nginx.sh
+
+    确认：ls -l roles/gateway/reload-nginx.sh   —— 最前面要是 -rwxr-xr-x"
+fi
 
 step "1/4 检查能不能连上注册中心"
 registry_reachable || die "连不上注册中心 $REGISTRY（地址或端口不通）。

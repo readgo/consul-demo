@@ -8,9 +8,11 @@
 
 | 机器 | IP（按 `cluster.env`） | 角色 | 说明 |
 |---|---|---|---|
-| node1 | `10.0.3.20` | k3s server + nginx 入口 | 起步时唯一的一台 |
-| node2 | `10.0.3.21` | k3s server | 后加 |
-| node3 | `10.0.3.22` | k3s server | 后加 |
+| node1 | `10.0.3.13` | k3s server + nginx 入口 | 起步时唯一的一台（演练机名 `k3s-t1`） |
+| node2 | `10.0.3.14` | k3s server | 后加，按实际 IP 改 |
+| node3 | `10.0.3.15` | k3s server | 后加，按实际 IP 改 |
+
+> 演练环境已占用：`.8/.9/.10` = 旧三台 k3s、`.11` = nginx 网关、`.12` = k3d。
 
 三台都是 server 而不是 1 server + 2 agent，因为 **k3s 的 server 节点默认没有 `NoSchedule` 污点**，可以直接跑业务 Pod。这样 3 台同时是「HA 控制面 + 3 个 worker」，关任意一台 etcd quorum 仍是 2/3。
 
@@ -40,6 +42,12 @@ k8s/
 宿主机路径：`/home/jing/jing.work/consul-demo/k8s/`
 
 **三台机器都要放一份**，位置统一为 `~/consul-demo-k8s/`。`join-server.sh` 在 node2/node3 上执行，所以那两台也得有。
+
+> **只做「阶段一 单机」时，最少需要这三样**：
+> `k3s-single/`（整个目录，含 `nginx/`）、同级的 `app.yml`、同级的 `rollout-watch.sh`。
+> 实际位置可以简化为 `~/k3s-single/` + `~/app.yml` + `~/rollout-watch.sh`
+> —— 脚本会依次在 `../app.yml`、`./app.yml`、`../../k8s/app.yml` 里找清单。
+> 只传了 `k3s-single/` 没传 `app.yml` 时，第 0 步就会报错，不会装到一半才失败。
 
 上传后，**三台都**执行：
 
@@ -106,7 +114,7 @@ kubectl rollout restart deploy/consul-demo
 
 ```bash
 cd ~/consul-demo-k8s/k3s-single
-sudo ./join-server.sh 10.0.3.20 <node-token>
+sudo ./join-server.sh 10.0.3.13 <node-token>
 ```
 
 token 在 node1 上取：`sudo cat /var/lib/rancher/k3s/server/node-token`
@@ -234,7 +242,7 @@ cd ~/consul-demo-k8s
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| `install-single.sh` 报「本机没有 10.0.3.20」 | `cluster.env` 的 IP 和实际不符 | 改 IP，三台同步 |
+| `install-single.sh` 报「本机没有 10.0.3.13」 | `cluster.env` 的 IP 和实际不符 | 改 IP，三台同步 |
 | Pod 一直 `ImagePullBackOff` | 节点拉不到 Docker Hub | 在有网的机器 `docker save` 后 `k3s ctr images import` |
 | `join-server.sh` 报连不上 6443 | node1 没起 / 防火墙 | `systemctl is-active k3s`、放行 6443/tcp、8472/udp |
 | `scale-out.sh` 说某节点没副本 | 资源不足，Pod 调度不上去 | `kubectl describe node <名>` 看 Allocated resources |

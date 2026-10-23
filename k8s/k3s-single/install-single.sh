@@ -59,8 +59,28 @@ run() {
 K() { k3s kubectl "$@"; }
 
 # ---------------------------------------------------------------
+# 清单文件定位：默认在 k3s-single/ 的上一级（即完整 k8s/ 目录里）。
+# 只上传了 k3s-single/ 这一层时，app.yml 会缺失，所以在第 0 步就先找、
+# 先报错——不能等到第 6 步 k3s 都装完了才发现没清单。
+if [ -z "${MANIFEST:-}" ]; then
+  for _c in "$SD/../app.yml" "$SD/app.yml" "$SD/../../k8s/app.yml"; do
+    if [ -f "$_c" ]; then MANIFEST="$_c"; break; fi
+  done
+fi
+
+# ---------------------------------------------------------------
 step 0/6 "前置检查"
 [ "$(id -u)" = "0" ] || die "请用 sudo 执行：sudo $0"
+
+if [ -z "${MANIFEST:-}" ] || [ ! -f "$MANIFEST" ]; then
+  die "找不到 app.yml（部署清单）。已找过：
+    $SD/../app.yml
+    $SD/app.yml
+    $SD/../../k8s/app.yml
+  最省事的做法：把仓库里的 k8s/app.yml 传到 $(dirname "$SD")/app.yml
+  也可以手动指定：sudo MANIFEST=/path/to/app.yml $0"
+fi
+ok "清单文件 $MANIFEST"
 
 if ! has_local_ip "$NODE1_IP"; then
   die "本机没有 ${NODE1_IP} 这个地址。实际地址：
@@ -158,9 +178,6 @@ fi
 
 # ---------------------------------------------------------------
 step 6/6 "部署并等待就绪"
-MANIFEST="$SD/../app.yml"
-[ -f "$MANIFEST" ] || die "找不到清单 $MANIFEST —— 请确保复制了整个 k8s/ 目录，而不只是 k3s-single/"
-
 if [ "$DRY_RUN" = "1" ]; then
   info "（dry-run）sed 替换 image 行 → k3s kubectl -n $NS apply -f -"
   info "（dry-run）k3s kubectl -n $NS rollout status deploy/$DEPLOY --timeout=300s"

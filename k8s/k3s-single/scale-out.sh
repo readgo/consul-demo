@@ -3,7 +3,7 @@
 #  scale-out.sh —— 阶段三：把流量和副本收敛到新节点
 #
 #  执行位置：只在 node1 执行（kubectl 面向整个集群，跑一次就够）
-#  前提：node2、node3 已用 join-server.sh 加入，且 kubectl get nodes 三台都 Ready
+#  前提：新节点已用 join-server.sh 加入，且 kubectl get nodes 全部 Ready
 #
 #  用法：
 #    ./scale-out.sh            # 自动判断要不要重分布，幂等
@@ -11,9 +11,12 @@
 #    ./scale-out.sh --dry-run  # 只打印计划
 #
 #  它做三件事，顺序不能反：
-#    1) 先让 Pod 分布到 3 台（rollout restart）
-#    2) 再把 3 台都写进 nginx upstream
+#    1) 先让 Pod 分布到所有 Ready 节点（rollout restart）
+#    2) 再把「有副本的节点」写进 nginx upstream
 #    3) nginx -t 通过后 reload
+#
+#  节点清单从 kubectl get nodes 动态取，不读 cluster.env：
+#    集群成员本来就在 etcd 里，加第 4、5、10 台时不需要改任何配置。
 #
 #  为什么必须是「先分布、后加 upstream」：
 #    Service 是 externalTrafficPolicy: Local —— 节点的 NodePort 只转发给
@@ -108,7 +111,10 @@ K get nodes -o wide --no-headers 2>/dev/null \
   | awk '{printf "      %-24s %-8s %s\n", $1, $2, $6}'
 
 UNREADY=0
-for ip in "$NODE1_IP" "$NODE2_IP" "$NODE3_IP"; do
+# 遍历「集群里实际 Ready 的节点」，不是 cluster.env 里写死的清单。
+# 写死清单的话，第 4 台之后加进来的节点不会被写进 upstream，
+# 而且不报错——流量永远绕过它，属于最难查的那种漏配。
+for ip in "${ALL_READY[@]}"; do
   if node_ready "$ip"; then
     printf '      %s✓%s %s\n' "$C_G" "$C_E" "$ip"
   else
@@ -116,7 +122,15 @@ for ip in "$NODE1_IP" "$NODE2_IP" "$NODE3_IP"; do
     UNREADY=$((UNREADY + 1))
   fi
 done
-[ "$UNREADY" -eq 3 ] && die "cluster.env 里的三个 IP 一个都没匹配上，检查 NODE*_IP 是否写对"
+[ "$UNREADY" -eq "${#ALL_READY[@]}" ] && die "没有可用节点，检查：kubectl get nodes"
+
+# 副本数少于节点数时，多出来的节点不会有 Pod，按 Local 规则它们的
+# NodePort 会直接 REJECT，因此不会进 upstream——这是对的，但要让人知道
+# 「加了机器没加副本 = 白加」，并给出该敲的命令。
+if [ "${REPLICAS:-0}" -gt 0 ] && [ "${REPLICAS}" -lt "${#ALL_READY[@]}" ]; then
+  warn "副本数 $REPLICAS < 节点数 ${#ALL_READY[@]}：只有 $REPLICAS 台会承载流量"
+  info "要扩副本：kubectl -n $NS scale deploy/$DEPLOY --replicas=${#ALL_READY[@]}"
+fi
 
 # ---------------------------------------------------------------
 step 2/4 "检查 Pod 分布"
@@ -133,16 +147,32 @@ dist_now() {
 info "当前："
 dist_now
 
-need_spread=0
+# 「需要重分布」的判据不是「有节点没 Pod」，而是「副本没铺开到应有的节点上」。
+# 因为副本数可能小于节点数：10 台机器、replicas=3 时，永远有 7 个节点没 Pod，
+# 按「有节点没 Pod 就重启」会把每一次 scale-out 都变成一次无意义的滚动。
+#   应铺开的节点数 want = min(REPLICAS, Ready 节点数)
+#   实际铺开的节点数 have = 有就绪副本的节点数
+#   have < want 或 就绪副本总数 < want  → 才需要重分布
+want="${REPLICAS:-0}"
+[ "$want" -gt "${#ALL_READY[@]}" ] && want="${#ALL_READY[@]}"
+
+have=0; pods_total=0
 for ip in "${ALL_READY[@]}"; do
-  [ "$(pods_on "$ip")" -eq 0 ] && need_spread=1
+  c=$(pods_on "$ip")
+  pods_total=$((pods_total + c))
+  [ "$c" -gt 0 ] && have=$((have + 1))
 done
+
+need_spread=0
+if [ "$have" -lt "$want" ] || [ "$pods_total" -lt "$want" ]; then
+  need_spread=1
+fi
 [ "$FORCE" = "1" ] && need_spread=1
 
 if [ "$need_spread" = "0" ]; then
-  info "每个 Ready 节点都有副本，分布已均衡，跳过 rollout restart"
+  info "副本已铺开到 $have/$want 个节点，分布已均衡，跳过 rollout restart"
 else
-  info "有节点还没有副本 → 触发一次滚动，让新 ReplicaSet 按 1-1-1 铺开"
+  info "副本只铺开到 $have/$want 个节点 → 触发一次滚动，让新 ReplicaSet 均匀铺开"
   info "（走 maxUnavailable: 0 的路径，旧 Pod 就绪副本不减少，业务不中断）"
   run K -n "$NS" rollout restart "deploy/$DEPLOY"
   if [ "$DRY_RUN" != "1" ]; then
@@ -158,7 +188,7 @@ step 3/4 "生成 nginx upstream"
 # 只把「Ready 且至少有一个就绪副本」的节点写进 upstream。
 # Local 模式下无 Pod 的节点会直接 REJECT，写进去等于给自己制造失败。
 UPSTREAM_IPS=()
-for ip in "$NODE1_IP" "$NODE2_IP" "$NODE3_IP"; do
+for ip in "${ALL_READY[@]}"; do
   node_ready "$ip" || continue
   if [ "$DRY_RUN" = "1" ]; then
     # dry-run 不真的重分布，此时新节点本来就没有副本，硬按「有副本」筛

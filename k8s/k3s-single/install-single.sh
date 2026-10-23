@@ -210,6 +210,7 @@ printf '%s阶段一完成%s\n' "$C_B" "$C_E"
 printf '  验证：curl -s http://127.0.0.1:%s/v1/test?name=standalone-$(date +%%H%%M%%S)\n' "$HTTP_PORT"
 
 TOKEN=$(cat /var/lib/rancher/k3s/server/node-token 2>/dev/null || echo "<读取失败>")
-printf '\n%s阶段二：在 node2、node3 上各执行一次%s\n' "$C_B" "$C_E"
+printf '\n%s阶段二：在每台新增节点上各执行一次%s\n' "$C_B" "$C_E"
 printf '  sudo ./join-server.sh %s %s\n' "$NODE1_IP" "$TOKEN"
+printf '  （新节点不用改 cluster.env —— 本机 IP 由脚本按路由自动探测）\n'
 printf '\n'

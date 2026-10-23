@@ -6,12 +6,15 @@
 
 ## 0. 拓扑与角色
 
-| 机器 | IP（按 `cluster.env`） | 角色 | 说明 |
+| 机器 | IP | 角色 | 说明 |
 |---|---|---|---|
-| node1 | `10.0.3.13` | k3s server + nginx 入口 | 起步时唯一的一台（演练机名 `k3s-t1`） |
-| node2 | `10.0.3.14` | k3s server | 后加，按实际 IP 改 |
-| node3 | `10.0.3.15` | k3s server | 后加，按实际 IP 改 |
+| node1 | `10.0.3.13` | k3s server + nginx 入口 | 起步时唯一的一台（演练机名 `k3s-t1`），**唯一写进 `cluster.env` 的 IP** |
+| node2 | 后加，实际 IP | k3s server | 不用改配置，`join-server.sh` 自动探测本机 IP |
+| node3 | 后加，实际 IP | k3s server | 同上 |
+| 第 4~10 台 | 后加，实际 IP | k3s server | 同上，**零配置** |
 
+> 集群成员是动态的（`K3S_URL` + `K3S_TOKEN` 加入，成员表在 etcd 里）。
+> `cluster.env` 只保留 `NODE1_IP` 做引导；节点清单由 `kubectl get nodes` 动态取。
 > 演练环境已占用：`.8/.9/.10` = 旧三台 k3s、`.11` = nginx 网关、`.12` = k3d。
 
 三台都是 server 而不是 1 server + 2 agent，因为 **k3s 的 server 节点默认没有 `NoSchedule` 污点**，可以直接跑业务 Pod。这样 3 台同时是「HA 控制面 + 3 个 worker」，关任意一台 etcd quorum 仍是 2/3。
@@ -41,7 +44,7 @@ k8s/
 
 宿主机路径：`/home/jing/jing.work/consul-demo/k8s/`
 
-**三台机器都要放一份**，位置统一为 `~/consul-demo-k8s/`。`join-server.sh` 在 node2/node3 上执行，所以那两台也得有。
+**每台机器都要放一份**，位置统一为 `~/k8s/`。`join-server.sh` 在新节点上执行，所以新加的每台也得有。
 
 > **只做「阶段一 单机」时，最少需要这三样**：
 > `k3s-single/`（整个目录，含 `nginx/`）、同级的 `app.yml`、同级的 `rollout-watch.sh`。
@@ -49,20 +52,22 @@ k8s/
 > —— 脚本会依次在 `../app.yml`、`./app.yml`、`../../k8s/app.yml` 里找清单。
 > 只传了 `k3s-single/` 没传 `app.yml` 时，第 0 步就会报错，不会装到一半才失败。
 
-上传后，**三台都**执行：
+上传后，**每台都**执行：
 
 ```bash
-cd ~/consul-demo-k8s/k3s-single
-chmod +x install-single.sh join-server.sh scale-out.sh
+cd ~/k8s/k3s-single
+chmod +x *.sh
 ```
 
-**改 `cluster.env` 里的三个 IP**（三台内容必须一致）：
+**只改 node1 那一台 `cluster.env` 里的 `NODE1_IP`**：
 
 ```bash
-vi cluster.env      # NODE1_IP / NODE2_IP / NODE3_IP
+grep -E '^NODE1_IP' cluster.env     # 应是 NODE1_IP=10.0.3.13
 ```
 
-> 脚本会自动校验：本机没有对应 IP 时直接报错并列出实际地址，不会装错地方。
+> 新加的机器**不需要改这个文件**：`join-server.sh` 会按「到 apiserver 的路由」
+> 自动探测本机 IP 并写成 `--node-ip`。`cluster.env` 里已没有 `NODE2_IP/NODE3_IP`，
+> 加第 4 台、第 10 台都不用动配置。
 
 ---
 
@@ -71,7 +76,7 @@ vi cluster.env      # NODE1_IP / NODE2_IP / NODE3_IP
 ### 【node1】执行
 
 ```bash
-cd ~/consul-demo-k8s/k3s-single
+cd ~/k8s/k3s-single
 sudo ./install-single.sh --dry-run     # 先看计划
 sudo ./install-single.sh               # 真跑
 ```
@@ -96,7 +101,7 @@ kubectl get pods -o wide          # 3 个 Pod 全在 node1，正常
 
 ```bash
 # 窗口 A
-cd ~/consul-demo-k8s
+cd ~/k8s
 URL='http://127.0.0.1:8080/v1/test?name=single-{TS}' DURATION_SEC=90 INTERVAL_MS=100 \
   ./rollout-watch.sh
 
@@ -108,27 +113,25 @@ kubectl rollout restart deploy/consul-demo
 
 ---
 
-## 3. 阶段二：扩到 3 台
+## 3. 阶段二：加机器（2 台、3 台……10 台，动作完全一样）
 
-### 【node2】执行
+### 【每台新节点】执行
 
 ```bash
-cd ~/consul-demo-k8s/k3s-single
+cd ~/k8s/k3s-single
 sudo ./join-server.sh 10.0.3.13 <node-token>
 ```
 
 token 在 node1 上取：`sudo cat /var/lib/rancher/k3s/server/node-token`
 
-### 【node3】执行
+**不用改 `cluster.env`**：脚本按「到 apiserver 的路由」自动探测本机 IP 写进 `--node-ip`。
 
-同上，命令一模一样。
-
-**判据**：各自出现 `✓ 10.0.3.2x 已加入集群`。
+**判据**：出现 `✓ <本机IP>，将加入 10.0.3.13 所在集群`，最后是 `✓ <本机IP> 已加入集群`。
 
 ### 【node1】确认
 
 ```bash
-kubectl get nodes -o wide          # 三台全 Ready，ROLES 都是 control-plane,etcd,master
+kubectl get nodes -o wide          # 全部 Ready，ROLES 都是 control-plane,etcd,master
 kubectl get pods -o wide           # 注意：Pod 仍然全在 node1，这是正常的
 ```
 
@@ -141,7 +144,7 @@ kubectl get pods -o wide           # 注意：Pod 仍然全在 node1，这是正
 ### 【node1】执行
 
 ```bash
-cd ~/consul-demo-k8s/k3s-single
+cd ~/k8s/k3s-single
 sudo ./scale-out.sh --dry-run     # 先看计划
 sudo ./scale-out.sh               # 真跑
 ```
@@ -215,7 +218,7 @@ URL='http://localhost:30081/v1/test?name=ha-{TS}' DURATION_SEC=180 INTERVAL_MS=1
 ### 【node1】执行
 
 ```bash
-cd ~/consul-demo-k8s
+cd ~/k8s
 ./deploy.sh                # 自动找最新 tag 并发版
 ```
 
@@ -242,20 +245,20 @@ cd ~/consul-demo-k8s
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| `install-single.sh` 报「本机没有 10.0.3.13」 | `cluster.env` 的 IP 和实际不符 | 改 IP，三台同步 |
+| `install-single.sh` 报「本机没有 10.0.3.13」 | `cluster.env` 的 IP 和实际不符 | 改 `NODE1_IP` |
 | Pod 一直 `ImagePullBackOff` | 节点拉不到 Docker Hub | 在有网的机器 `docker save` 后 `k3s ctr images import` |
 | `join-server.sh` 报连不上 6443 | node1 没起 / 防火墙 | `systemctl is-active k3s`、放行 6443/tcp、8472/udp |
 | `scale-out.sh` 说某节点没副本 | 资源不足，Pod 调度不上去 | `kubectl describe node <名>` 看 Allocated resources |
 | 关节点后有 1 个请求慢 1 秒 | `proxy_connect_timeout 1s` 在等死节点的 SYN | 正常现象，要更快就降到 500ms |
 | 关节点后出现 502 | 该节点 `iptables` 残留指向已删 Pod | 属 `timeout server` 场景，已由 `proxy_next_upstream` 兜住；仍有则调 `preStop` 到 8~10 秒 |
 | `nginx -t` 报 upstream 未定义 | `00-upstream-*.conf` 没生成 | 重跑 `scale-out.sh` |
-| 三台都 Ready 但 Pod 全在 node1 | 加节点不会迁移已有 Pod | 正常，跑 `scale-out.sh` |
+| 多台 Ready 但 Pod 全在 node1 | 加节点不会迁移已有 Pod | 正常，跑 `scale-out.sh` |
 
 ---
 
 ## 9. 清理
 
-**【三台都执行】**
+**【每台都执行】**
 
 ```bash
 sudo /usr/local/bin/k3s-uninstall.sh

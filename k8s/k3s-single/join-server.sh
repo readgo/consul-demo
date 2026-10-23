@@ -44,22 +44,29 @@ die()  { printf '%s✗ %s%s\n' "$C_R" "$*" "$C_E" >&2; exit 1; }
 
 # ---------------------------------------------------------------
 step 0/3 "识别本机身份"
-MY_IP=""
-for ip in "$NODE2_IP" "$NODE3_IP"; do
-  if has_local_ip "$ip"; then
-    MY_IP="$ip"
-    break
-  fi
-done
+# 本机 IP 用「到 apiserver 的路由」反查，不读任何写死的节点清单。
+# 这样加第 4、5、10 台时不需要改 cluster.env——集群成员本来就是动态的
+# （K3S_URL + K3S_TOKEN 加入，成员表在 etcd 里）。
+detect_my_ip() {
+  ip -4 route get "$1" 2>/dev/null \
+    | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}'
+}
 
+MY_IP="${MY_IP:-}"
 if [ -z "$MY_IP" ]; then
-  if has_local_ip "$NODE1_IP"; then
-    die "这台是 node1（$NODE1_IP）。本脚本要在 node2 / node3 上执行。"
-  fi
-  die "本机 IP 既不是 $NODE2_IP 也不是 $NODE3_IP。实际地址：
-$(ip -4 addr show | awk '/inet /{print "    "$2}')
-请改 cluster.env 里的 NODE2_IP / NODE3_IP"
+  MY_IP=$(detect_my_ip "$SERVER_IP")
 fi
+if [ -z "$MY_IP" ]; then
+  # 到 server 没有可用路由时，退回第一个非回环 IPv4
+  MY_IP=$(ip -4 addr show 2>/dev/null \
+          | awk '$1=="inet" && $2 !~ /^127\./{sub(/\/.*/,"",$2); print $2; exit}')
+fi
+[ -n "$MY_IP" ] || die "无法确定本机 IP。手动指定：sudo MY_IP=<本机IP> $0 $SERVER_IP <token>"
+
+if [ "$MY_IP" = "$SERVER_IP" ]; then
+  die "本机就是 $SERVER_IP（第一个 server），本脚本要在新增节点上执行。"
+fi
+
 ok "本机是 $MY_IP，将加入 $SERVER_IP 所在集群"
 
 if systemctl is-active --quiet k3s 2>/dev/null; then

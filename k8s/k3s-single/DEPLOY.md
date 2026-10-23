@@ -39,6 +39,7 @@ k8s/
     ├── join-server.sh
     ├── scale-out.sh
     ├── update.sh            ← 日常发版：拉 latest → 滚更 → 报告版本变更
+    ├── install-headlamp.sh  ← 装 Headlamp 图形界面（可选）
     ├── rollout-test.sh      ← 单机阶段验滚动更新（一键，自己起观测器）
     ├── nginx/consul-demo.conf
     └── DEPLOY.md            ← 本文件
@@ -96,6 +97,20 @@ kubectl get pods -o wide          # 3 个 Pod 全在 node1，正常
 ```
 
 第一条应返回 `hello:standalone-<时间戳>`。三条都对，单机阶段成立。
+
+### 【node1】装 Headlamp 图形界面（可选）
+
+```bash
+cd ~/k8s/k3s-single
+sudo ./install-headlamp.sh
+```
+
+装完打开 `http://10.0.3.13:30090`，登录页选 **Token**，粘贴脚本打印的那串（24h 有效，
+重开用 `sudo ./install-headlamp.sh --token`）。卸载 `--uninstall`，换端口 `--port 30091`。
+
+走的是 NodePort，不是 Port-forward —— 所以不需要常驻进程、不需要 systemd、重启机器自动恢复。
+镜像 `ghcr.io/headlamp-k8s/headlamp` 国内经常拉不动，脚本会提示两种办法（换镜像地址 /
+在能上网的机器 `docker save` 后 `k3s ctr images import`）。
 
 ### 【两台机器】日常发版就两个操作
 

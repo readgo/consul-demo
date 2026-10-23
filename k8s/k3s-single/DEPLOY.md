@@ -38,6 +38,7 @@ k8s/
     ├── install-single.sh
     ├── join-server.sh
     ├── scale-out.sh
+    ├── update.sh            ← 日常发版：拉 latest → 滚更 → 报告版本变更
     ├── rollout-test.sh      ← 单机阶段验滚动更新（一键，自己起观测器）
     ├── nginx/consul-demo.conf
     └── DEPLOY.md            ← 本文件
@@ -95,6 +96,44 @@ kubectl get pods -o wide          # 3 个 Pod 全在 node1，正常
 ```
 
 第一条应返回 `hello:standalone-<时间戳>`。三条都对，单机阶段成立。
+
+### 【两台机器】日常发版就两个操作
+
+**操作 1（宿主机，一个窗口，别关）**：
+
+```bash
+cd ~/jing.work/consul-demo
+URL='http://localhost:30084/v1/test?name=jing-{TS}' DURATION_SEC=180 INTERVAL_MS=100 \
+  ./k8s/rollout-watch.sh
+```
+
+**操作 2（node1，另一个窗口）**：
+
+```bash
+cd ~/k8s/k3s-single
+sudo ./update.sh
+```
+
+`update.sh` 做四件事：拉 `wttcvs/consul-demo:latest` → 反查 latest 对应哪个 `v*` 版本 → `set image` 滚动 → 打一行结论：
+
+```
+────────────────────────────────────────
+  ✓ 已从 v20261022-172323 更新到 v20261023-110000
+────────────────────────────────────────
+  镜像  wttcvs/consul-demo:v20261023-110000
+  摘要  aaaaaaaaaaaa → bbbbbbbbbbbb
+  副本  3/3 就绪
+```
+
+需要知道的三个边界：
+
+| 情况 | 脚本行为 |
+|---|---|
+| `latest` 没变（CI 还没构建完） | 打印「已是最新，无需更新」，什么都不改。想练滚动用 `sudo ./update.sh --force` |
+| 镜像拉不下来 | 直接中止，**线上一个 Pod 都不动**（还是旧版本） |
+| 滚到一半新 Pod 起不来 | 自动 `rollout undo` 回上一版 |
+
+其它参数：`--tag v20261023-110000` 指定版本（不拉 latest）、`--dry-run` 只看计划。发布完成后回窗口 1 按 `Ctrl+C` 看汇总，**判据 `失败 : 0`**。
 
 ### 【node1】验证零中断滚动更新（单机版）
 

@@ -75,7 +75,14 @@ URL='http://localhost:30084/v1/test?name=jing-{TS}' DURATION_SEC=300 INTERVAL_MS
 
 **【node1】**，另开一个窗口（第 2 步那个窗口保持不动）。
 
-先确认要用哪个 tag——两个选择：
+**最省事：一条命令。** 它拉 `latest`、反查版本号、滚动、最后打印「从 X 更新到 Y」：
+
+```bash
+cd ~/k8s/k3s-single
+sudo ./update.sh
+```
+
+想手工控制就用下面两条，作用一样：
 
 ```bash
 # (a) 你有新 tag：换成它
@@ -173,17 +180,21 @@ consul-demo-7c9f8b6d4    0         0         0       2h     ← 旧的，已归�
 
 ---
 
-## 附：三条命令版（已经熟了就用这个）
+## 附：两条命令版（已经熟了就用这个）
 
 ```bash
-# 宿主机 窗口A
+# 宿主机 窗口A：一直打请求
 cd ~/jing.work/consul-demo && URL='http://localhost:30084/v1/test?name=jing-{TS}' \
-  DURATION_SEC=300 INTERVAL_MS=100 ./k8s/rollout-watch.sh
+  DURATION_SEC=180 INTERVAL_MS=100 ./k8s/rollout-watch.sh
 
-# node1 窗口B
+# node1 窗口B：拉 latest → 滚更 → 打印「从 X 到 Y」
+cd ~/k8s/k3s-single && sudo ./update.sh
+```
+
+窗口 A 按 `Ctrl+C`，看 `失败 : 0` 即通过。想核对版本再补：
+
+```bash
 kubectl -n default get deploy consul-demo -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
-kubectl -n default set image deploy/consul-demo app=wttcvs/consul-demo:<新tag>
-kubectl -n default rollout status deploy/consul-demo --timeout=180s
 kubectl -n default get pods -l app=consul-demo \
   -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.containerStatuses[0].image}{"\n"}{end}'
 ```

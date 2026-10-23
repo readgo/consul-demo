@@ -106,7 +106,15 @@ if [ -z "${WATCH:-}" ] || [ ! -f "$WATCH" ]; then
 fi
 ok "观测器 $WATCH"
 
-R=$(ready_replicas); R=${R:-0}
+R=0
+# readyReplicas 在「Pod 刚被删、新 Pod 还没 Ready」的瞬间会是空字符串（字段不存在），
+# 直接拿去比较会报 integer expression expected。清洗成纯数字，再重试几轮。
+for _i in 1 2 3; do
+  R=$(printf '%s' "$(ready_replicas)" | tr -cd '0-9')
+  R=${R:-0}
+  [ "$R" -ge 1 ] && break
+  sleep 1
+done
 if [ "$R" -lt 1 ]; then
   die "deploy/$DEPLOY 没有就绪副本（readyReplicas=$R）。先确认：kubectl -n $NS get pods"
 fi

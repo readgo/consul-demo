@@ -254,7 +254,39 @@ URL='http://localhost:30084/v1/test?name=jing-{TS}' DURATION_SEC=180 INTERVAL_MS
 
 ## 3. 阶段二：加机器（2 台、3 台……10 台，动作完全一样）
 
+### 【新 VM 控制台】先做三件事，缺一件就炸
+
+从 node1 克隆一台 VM 最省事，但**克隆体带着 node1 的 etcd 数据和同一套证书**，不处理直接开机就是事故。
+
+| # | 做什么 | 命令 |
+|---|---|---|
+| 1 | 改 hostname（k3s 拿它当节点名，同名会把 node1 顶掉） | `sudo hostnamectl set-hostname k3s-t2` |
+| 2 | 改 IP，不能和 node1 撞 | `sudo nmcli con mod <连接名> ipv4.addresses 10.0.3.14/24` 或改 netplan 后 `sudo netplan apply` |
+| 3 | 卸掉克隆来的 k3s（**关键**） | `sudo /usr/local/bin/k3s-uninstall.sh` |
+
+改完 `reboot`，然后确认干净了：
+
+```bash
+hostname -s                      # k3s-t2
+ip -4 addr | grep 'inet '        # 10.0.3.14
+systemctl is-active k3s          # inactive
+ls /var/lib/rancher/k3s          # No such file or directory
+```
+
+四条都对再往下走。`join-server.sh` 会拦住「k3s 还在跑」和「hostname 重名」这两种状态，但 IP 冲突它挡不住——两个 10.0.3.13 会让整个网段出问题。
+
+> 新建一台空 VM 的话，跳过第 3 项（本来就没装 k3s）。
+
 ### 【每台新节点】执行
+
+先在宿主机把这个目录推上去（新 VM 上也得有一份）：
+
+```bash
+# 宿主机
+rsync -az --delete ~/jing.work/consul-demo/k8s/ jing@10.0.3.14:~/k8s/
+```
+
+然后在新 VM 上：
 
 ```bash
 cd ~/k8s/k3s-single

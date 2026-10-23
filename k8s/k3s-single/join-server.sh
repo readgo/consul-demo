@@ -67,29 +67,65 @@ if [ "$MY_IP" = "$SERVER_IP" ]; then
   die "本机就是 $SERVER_IP（第一个 server），本脚本要在新增节点上执行。"
 fi
 
-ok "本机是 $MY_IP，将加入 $SERVER_IP 所在集群"
+ok "本机是 $MY_IP（hostname: $(hostname -s)），准备加入 $SERVER_IP 所在集群"
+
+# 先查集群现有节点。k3s 的 server token 当 Bearer 直接能读 /api/v1/nodes，
+# 不需要本机先有 kubeconfig —— 这一步就是「我现在到底在哪台机器上」的凭证。
+nodes_json=$(curl -kfsS --max-time 5 \
+  -H "Authorization: Bearer ${TOKEN}" \
+  "https://${SERVER_IP}:${K3S_API_PORT}/api/v1/nodes" 2>/dev/null) || nodes_json=""
+
+# 从节点列表里按 IP 反查节点名（有 python3 就精确解 JSON，没有就不显示名字）
+node_name_of_ip() {
+  local ip="$1"
+  command -v python3 >/dev/null 2>&1 || return 1
+  printf '%s' "$nodes_json" | python3 -c '
+import json,sys
+ip=sys.argv[1]
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(1)
+for n in d.get("items",[]):
+    for a in n.get("status",{}).get("addresses",[]):
+        if a.get("address")==ip:
+            print(n["metadata"]["name"]); sys.exit(0)
+sys.exit(1)' "$ip" 2>/dev/null
+}
+
+# ---------------------------------------------------------------
+# 最常见的一种情况：这台机器已经是集群成员了，用户又跑了一次脚本。
+# 必须排在「k3s 在跑」前面判断——否则会误报成「克隆机没卸 k3s」，
+# 让人以为要卸载一台正在正常服务的节点。
+if [ -n "$nodes_json" ] && printf '%s' "$nodes_json" | grep -q "\"address\":\"${MY_IP}\""; then
+  _n=$(node_name_of_ip "$MY_IP") || _n=""
+  printf '\n%s✓ 本机（%s%s）已经是这个集群的成员了，不需要再 join%s\n' \
+    "$C_G" "$MY_IP" "${_n:+ / $_n}" "$C_E"
+  printf '  确认成员：kubectl get nodes -o wide\n'
+  printf '  给**新机器**加节点，请在那台机器上执行本脚本，不要在这台重跑。\n'
+  printf '  本机 k3s 正在正常服务，什么都不要动。\n'
+  printf '  （如果你以为自己在另一台机器上——比如刚克隆的那台——说明它的\n'
+  printf '    hostname/IP 还没改，和这台撞了：先 ip -4 addr 核对再改。）\n\n'
+  exit 0
+fi
 
 if systemctl is-active --quiet k3s 2>/dev/null; then
-  die "本机 k3s 已经在跑了，不能再 join。
+  die "本机（$(hostname -s) / $MY_IP）的 k3s 在跑，但它不是 $SERVER_IP 这个集群的成员。
 
-  十有八九是「克隆了 node1 的虚拟机」——克隆出来的机器带着 node1 的
-  集群数据和同一套证书。直接启动会以同名节点注册，把 node1 顶掉，全站挂。
+  两种可能：
+  A) 克隆来的虚拟机，带着原来的集群数据 —— 直接 join 会以同名节点注册，
+     把那台节点顶掉，全站挂。
+  B) 之前装到一半失败，k3s 起来了但没注册成功。
 
-  先在本机彻底卸掉 k3s，再重跑本脚本：
-      sudo /usr/local/bin/k3s-uninstall.sh      # 停服务 + 删 /var/lib/rancher/k3s
+  两种都先在本机卸干净，再重跑本脚本：
+      sudo /usr/local/bin/k3s-uninstall.sh        # 停服务 + 删 /var/lib/rancher/k3s
       sudo /usr/local/bin/k3s-agent-uninstall.sh  # 上面那个不存在时用这个
-  然后确认真干净了：ls /var/lib/rancher/k3s 2>/dev/null（应报 No such file）"
+  确认干净：ls /var/lib/rancher/k3s 2>/dev/null（应报 No such file）"
 fi
 
 # ---------------------------------------------------------------
 step 0.5/3 "检查 hostname 是否和集群里已有的节点重名"
 # k3s 用 hostname 当节点名。克隆机通常也叫 k3s-t1，join 上去会顶替同名节点
 # （node1 从集群消失，上面所有 Pod 变 NotReady），这是加机器最容易炸的一种。
-# 下面用 server token 直接查 apiserver，查不到就跳过，不影响后续流程。
 MY_NAME="$(hostname -s)"
-nodes_json=$(curl -kfsS --max-time 5 \
-  -H "Authorization: Bearer ${TOKEN}" \
-  "https://${SERVER_IP}:${K3S_API_PORT}/api/v1/nodes" 2>/dev/null) || nodes_json=""
 
 if [ -n "$nodes_json" ]; then
   case "$nodes_json" in
@@ -97,7 +133,7 @@ if [ -n "$nodes_json" ]; then
       die "本机 hostname「${MY_NAME}」已经是集群里的一个节点名。
       不改名就 join，会把那台节点顶掉。先改名再重跑：
 
-          sudo hostnamectl set-hostname k3s-t2      # 换成没被占用的名字
+          sudo hostnamectl set-hostname <新节点名>   # 例如 k3s-t3，不能和现有节点同名
           exec sudo -i                              # 让新 hostname 生效
           sudo $0 $SERVER_IP <token>"
       ;;

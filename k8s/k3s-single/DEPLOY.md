@@ -102,9 +102,9 @@ kubectl get pods -o wide          # 3 个 Pod 全在 node1，正常
 
 ```bash
 cd ~/k8s/k3s-single
-sudo ./rollout-test.sh --restart     # 先跑这个：30 秒，只重建 Pod 不换镜像
-sudo ./rollout-test.sh               # 再跑这个：真换版本（本地造 tag，不联网）
-sudo ./rollout-test.sh --bad         # 最后跑这个：发坏镜像，验证旧版本不被删
+sudo ./rollout-test.sh --restart     # ① 30 秒，只重建 Pod 不换镜像
+sudo ./rollout-test.sh               # ② 真换版本（本地造 tag，不联网）
+sudo ./rollout-test.sh --bad         # ③ 发坏镜像，验证旧版本不被删
 ```
 
 三种模式各自证明什么：
@@ -117,18 +117,78 @@ sudo ./rollout-test.sh --bad         # 最后跑这个：发坏镜像，验证�
 
 脚本自己在后台起 `rollout-watch.sh`（100ms 一次持续打压），滚完自动停采样、解析汇总、给结论，退出码 0 = 通过。
 
+### 【node1】拉远程镜像做真实发版
+
+上面默认模式是「本地造 tag」，不测网络。真实发版的链路是：
+
+```
+本地打 git tag → 推 GitHub → Actions 构建 → 推 Docker Hub wttcvs/consul-demo:<tag> → node1 拉取
+```
+
+**第一步：确认有新 tag 可发**（在宿主机执行，不需要 docker）：
+
+```bash
+git -C ~/jing.work/consul-demo fetch --tags
+git -C ~/jing.work/consul-demo tag -l 'v*' --sort=-creatordate | head -5
+
+# 确认 Docker Hub 上真的有这个 tag（打印 200 就是有）
+curl -s -o /dev/null -w '%{http_code}\n' \
+  https://hub.docker.com/v2/repositories/wttcvs/consul-demo/tags/<tag>/
+```
+
+如果 GitHub 上还没有比线上更新的 tag，先造一个——`deploy_ci/release/release.sh` 会打 tag 并推上去，Actions 随后构建：
+
+```bash
+# 在宿主机（装 git 的那台）执行
+cd ~/jing.work/consul-demo
+./deploy_ci/release/release.sh --wait
+```
+
+**第二步：在 node1 上发版**
+
+```bash
+cd ~/k8s
+sudo TAG=v20261023-110000 ./deploy.sh        # 指定 tag
+# 或 sudo ./deploy.sh                        # 自动问 Docker Hub 找最新 tag
+```
+
+`deploy.sh` 会 `[4/6] 在节点上预拉镜像` —— 先 `crictl pull` 把镜像落盘，**成功之后**才 `set image`。
+
 **判据**：
 
 ```
-✓ 通过：812 次请求全部 200，滚动更新期间服务无中断
+[4/6] 在节点上预拉镜像
+      拉取 wttcvs/consul-demo:v20261023-110000（超时 600s…）
+      ✓ 镜像已落盘
+[6/6] ✓ 发布成功：wttcvs/consul-demo:v20261023-110000
 ```
+
+> 预拉失败会**中止发版**并打印三种原因（拉不到 Hub / 私有仓库要 `--creds` / tag 没推上去）。
+> 这一步故意做得比「直接 set image」啰嗦：不预拉的话失败表现是 Pod 卡在
+> `ImagePullBackOff`，而 `maxUnavailable: 0` 会让滚动一直不完成，看起来像「滚动更新有问题」，
+> 实际是网络问题。想跳过预拉用 `PREPULL=0`。
+
+**第三步：看有没有断**
+
+观测窗口在**宿主机**跑（在 node1 上跑就把 URL 换成 `127.0.0.1:8080`）：
+
+```bash
+cd ~/jing.work/consul-demo
+URL='http://localhost:30084/v1/test?name=jing-{TS}' DURATION_SEC=180 INTERVAL_MS=100 \
+  ./k8s/rollout-watch.sh
+```
+
+> **别按 `Ctrl+Z`**。它只是把进程挂起，作业还占着，`DURATION_SEC` 也不会生效。
+> 要停就 `Ctrl+C`（会打印汇总）。已经挂起了：`jobs` 看编号，然后 `kill %1`。
+
+**判据**：汇总 `失败 0`，退出码 0。
 
 失败时会打出失败明细（前 10 条），并用 `✗ 未通过` + 退出码 1 结束。
 
 > 为什么不看 `kubectl rollout status` 就下结论：它只说明「Pod 都就绪了」，
 > 期间掉 3 个请求它照样 Success。必须有外部持续打压才能下判断。
 
-> 默认模式结束后，线上跑的是本地测试 tag（形如 `vtest-20261023-103000`），
+> 上面 `rollout-test.sh` 默认模式结束后，线上跑的是本地测试 tag（形如 `vtest-20261023-103000`），
 > 它不在任何 registry 上。要恢复原版本，脚本末尾会打印现成的 `kubectl set image` 命令。
 > `app.yml` 里的 image 没动，下次 apply 会自动退回原镜像。
 

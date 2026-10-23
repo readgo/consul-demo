@@ -10,8 +10,26 @@
 #    ./k8s/deploy.sh --dry-run        # 只打印将要执行的命令，不动集群
 #    TAG=v20261022-170000 ./k8s/deploy.sh   # 跳过发现，指定 tag
 #    LOCAL_ONLY=1 ./k8s/deploy.sh     # 只认本机 containerd 里已有的镜像
+#    PREPULL=0 ./k8s/deploy.sh        # 跳过预拉，直接让 kubelet 自己去拉
+#    REPO=wttcvs/consul-demo TAG=v20261023-110000 ./k8s/deploy.sh
 #
 #  配套：另开一个窗口跑 ./k8s/rollout-watch.sh，这里发、那边看有没有断。
+#
+#  ------------------------------------------------------------------
+#  预拉（PREPULL，默认开）为什么必须有：
+#
+#    镜像由 GitHub Actions 构建后推到 Docker Hub（见 .github/workflows/
+#    release.yml），k3s 节点是直接去 Docker Hub 拉的。国内链路上这一步
+#    经常几分钟拉不动，kubelet 于是把 Pod 停在 ImagePullBackOff，而
+#    maxUnavailable: 0 会让它一直卡住——此时 kubectl 只说「滚动没完成」，
+#    并不说「拉不动镜像」。
+#
+#    所以先在节点上 crictl pull 把镜像落盘，成功之后再 set image：
+#    此时 Pod 启动是秒级，滚动更新才真的能测出「业务有没有断」，
+#    而不是在测网络。
+#
+#    预拉还有一个副作用是好的：crictl pull 支持 --creds，私有仓库不用
+#    在集群里配 imagePullSecret 也能先把镜像落盘。
 #
 #  ------------------------------------------------------------------
 #  为什么不能只信一个来源：
@@ -35,6 +53,8 @@ LOCAL_ONLY="${LOCAL_ONLY:-0}"      # 1 = 不查 Docker Hub
 HUB_CHECK="${HUB_CHECK:-1}"        # 0 = 完全不联网
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-180s}"
 DRY_RUN="${DRY_RUN:-0}"
+PREPULL="${PREPULL:-1}"            # 1 = set image 前先在节点上把镜像拉下来
+PULL_TIMEOUT="${PULL_TIMEOUT:-600}"  # crictl pull 的超时（秒），国内链路要给足
 
 if [ -t 1 ]; then
   C_RED=$'\e[31m'; C_YEL=$'\e[33m'; C_GRN=$'\e[32m'; C_DIM=$'\e[2m'; C_B=$'\e[1m'; C_END=$'\e[0m'
@@ -45,6 +65,7 @@ fi
 step() { printf '\n%s[%s]%s %s\n' "$C_B" "$1" "$C_END" "$2"; }
 info() { printf '      %s\n' "$*"; }
 warn() { printf '      %s%s%s\n' "$C_YEL" "$*" "$C_END"; }
+ok()   { printf '      %s✓ %s%s\n' "$C_GRN" "$*" "$C_END"; }
 err()  { printf '%s%s%s\n' "$C_RED" "$*" "$C_END" >&2; }
 die()  { err "✗ $*"; exit 1; }
 
@@ -56,7 +77,7 @@ if ! kubectl -n "$NS" get deploy "$DEPLOY" --request-timeout=10s >/dev/null 2>&1
 fi
 
 # ---------- 1. 读当前版本 ----------
-step 1/5 "读取当前版本"
+step 1/6 "读取当前版本"
 maybe_dry=""
 [ "$DRY_RUN" = "1" ] && maybe_dry="（dry-run，不会真的执行）"
 
@@ -122,7 +143,7 @@ tags_hub() {
     | while IFS= read -r t; do is_release_tag "$t" && printf '%s\n' "$t"; done
 }
 
-step 2/5 "发现可用 tag"
+step 2/6 "发现可用 tag"
 
 local_latest=""
 local_tags=""
@@ -165,16 +186,20 @@ fi
 
 info "${C_GRN}选定            : $new_tag${C_END}"
 
-# Hub 上有、本地没有 → 告警但继续（kubelet 会去拉）
+# Hub 上有、本地没有 → 下一步会主动预拉（PREPULL=0 时交给 kubelet）
 if [ -n "$local_latest" ] && [ "$new_tag" != "$local_latest" ] && [ "$new_tag" != "$cur_tag" ]; then
   if ! printf '%s\n' "$local_tags" | grep -qx "$new_tag"; then
-    warn "⚠ 本机 containerd 里没有 $new_tag —— kubelet 会去仓库拉取。"
-    warn "  拉不动时会 ImagePullBackOff，需要先 k3s ctr images import 或配好镜像加速。"
+    if [ "$PREPULL" = "1" ]; then
+      info "本机 containerd 里还没有 $new_tag，下一步会先拉下来再发版"
+    else
+      warn "⚠ 本机 containerd 里没有 $new_tag，且 PREPULL=0 —— kubelet 会去仓库拉取"
+      warn "  拉不动时会 ImagePullBackOff，此时 maxUnavailable: 0 会让滚动一直卡住"
+    fi
   fi
 fi
 
 # ---------- 3. 是否需要发版 ----------
-step 3/5 "对比版本"
+step 3/6 "对比版本"
 if [ "$new_tag" = "$cur_tag" ]; then
   info "线上已经是 $new_tag，无需发版。"
   info "${C_DIM}想强制重建 Pod 用：kubectl -n $NS rollout restart deploy/$DEPLOY${C_END}"
@@ -182,8 +207,73 @@ if [ "$new_tag" = "$cur_tag" ]; then
 fi
 info "线上 $cur_tag  →  目标 $new_tag"
 
-# ---------- 4. 执行 ----------
-step 4/5 "更新镜像"
+# ---------- 4. 预拉镜像 ----------
+step 4/6 "在节点上预拉镜像"
+REF="$cur_repo:$new_tag"
+
+pull_ok=0
+if [ "$PREPULL" != "1" ]; then
+  info "已跳过（PREPULL=0），由 kubelet 自己拉"
+  pull_ok=1
+elif ! command -v k3s >/dev/null 2>&1; then
+  info "本机没有 k3s 命令（在宿主机/独立入口机上执行），跳过预拉"
+  info "kubelet 会自己拉；拉不动就停在 ImagePullBackOff。"
+  info "想让这一步也生效，到任意一个 k3s 节点上重跑本脚本。"
+  pull_ok=1
+fi
+
+if [ "$pull_ok" = "0" ] && [ "$DRY_RUN" = "1" ]; then
+  info "（dry-run）k3s crictl pull $REF"
+elif [ "$pull_ok" = "0" ]; then
+  # crictl 要访问 containerd 的 socket，必须 root。sudo -n 是不交互探测：
+  # 需要密码时立刻返回非 0，不会让脚本卡在密码提示上。
+  if [ "$(id -u)" = "0" ]; then
+    PULL=(k3s crictl pull "$REF")
+    IMGS=(k3s crictl images)
+  elif sudo -n true 2>/dev/null; then
+    PULL=(sudo -n k3s crictl pull "$REF")
+    IMGS=(sudo -n k3s crictl images)
+  else
+    die "预拉镜像需要 root，而当前 sudo 需要输密码。用 sudo 重跑（记得带上原来的变量）：
+  sudo TAG=$new_tag $0
+  或者跳过预拉：PREPULL=0 $0"
+  fi
+
+  # 先看本地有没有，避免每次发版都白跑一次网络
+  _imgs=$("${IMGS[@]}" 2>/dev/null) || _imgs=''
+  if [ -n "$_imgs" ] && printf '%s\n' "$_imgs" \
+      | awk -v r="$cur_repo" -v t="$new_tag" \
+          'NR>1{ n=$1; sub(/^docker\.io\//,"",n); if (n==r && $2==t) f=1 } END{exit !f}'; then
+    ok "本机已有 $REF，跳过拉取"
+  else
+    info "拉取 $REF（超时 ${PULL_TIMEOUT}s，首次要下整层，别急着 Ctrl+C）"
+    if timeout "$PULL_TIMEOUT" "${PULL[@]}" 2>&1 | sed 's/^/      /'; then
+      ok "镜像已落盘"
+    else
+      printf '\n'
+      warn "拉取失败。按顺序排除这三种原因："
+      warn "  1) 拉不到 Docker Hub（国内最常见）"
+      info "     在能联网的机器上：docker pull $REF && docker save $REF | gzip > img.tgz"
+      info "     传过来后：gunzip -c img.tgz | sudo k3s ctr -n k8s.io images import -"
+      warn "  2) 私有仓库需要凭据"
+      info "     sudo k3s crictl pull --creds <用户名>:<密码或token> $REF"
+      info "     （crictl 直接带凭据，不用在集群里配 imagePullSecret）"
+      warn "  3) tag 写错，或 GitHub Actions 还没把镜像推上去"
+      info "     去 https://hub.docker.com/r/$cur_repo/tags 确认 $new_tag 存在"
+      die "预拉没成功，已中止发版 —— 这时候 set image 只会换来 ImagePullBackOff"
+    fi
+  fi
+
+  # 多节点：本脚本只处理执行机这一台。新 Pod 被调度到别的节点时，
+  # 那台会各自去拉一次（慢一次，不会坏）。
+  _n=$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready"{c++} END{print c+0}')
+  if [ "${_n:-0}" -gt 1 ]; then
+    warn "集群有 $_n 个节点，这里只拉了本机。其它节点首次调度到会各自拉取一次。"
+  fi
+fi
+
+# ---------- 5. 执行 ----------
+step 5/6 "更新镜像"
 cmd=(kubectl -n "$NS" set image "deploy/$DEPLOY" "$CONTAINER=$cur_repo:$new_tag")
 printf '      %s%s%s\n' "$C_DIM" "${cmd[*]}" "$C_END"
 if [ "$DRY_RUN" = "1" ]; then
@@ -193,7 +283,7 @@ fi
 "${cmd[@]}" || die "set image 失败"
 
 # ---------- 5. 等待滚动完成 ----------
-step 5/5 "等待滚动更新完成（超时 $ROLLOUT_TIMEOUT）"
+step 6/6 "等待滚动更新完成（超时 $ROLLOUT_TIMEOUT）"
 if kubectl -n "$NS" rollout status "deploy/$DEPLOY" --timeout="$ROLLOUT_TIMEOUT"; then
   printf '\n%s✓ 发布成功：%s%s\n' "$C_GRN" "$cur_repo:$new_tag" "$C_END"
   printf '\n  回滚上一版：kubectl -n %s rollout undo deploy/%s\n' "$NS" "$DEPLOY"

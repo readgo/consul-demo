@@ -38,6 +38,7 @@ k8s/
     ├── install-single.sh
     ├── join-server.sh
     ├── scale-out.sh
+    ├── rollout-test.sh      ← 单机阶段验滚动更新（一键，自己起观测器）
     ├── nginx/consul-demo.conf
     └── DEPLOY.md            ← 本文件
 ```
@@ -97,19 +98,39 @@ kubectl get pods -o wide          # 3 个 Pod 全在 node1，正常
 
 ### 【node1】验证零中断滚动更新（单机版）
 
-开两个窗口：
+一条命令，不用开两个窗口：
 
 ```bash
-# 窗口 A
-cd ~/k8s
-URL='http://127.0.0.1:8080/v1/test?name=single-{TS}' DURATION_SEC=90 INTERVAL_MS=100 \
-  ./rollout-watch.sh
-
-# 窗口 B
-kubectl rollout restart deploy/consul-demo
+cd ~/k8s/k3s-single
+sudo ./rollout-test.sh --restart     # 先跑这个：30 秒，只重建 Pod 不换镜像
+sudo ./rollout-test.sh               # 再跑这个：真换版本（本地造 tag，不联网）
+sudo ./rollout-test.sh --bad         # 最后跑这个：发坏镜像，验证旧版本不被删
 ```
 
-**判据**：窗口 A 汇总为 `失败 0`，退出码 0。
+三种模式各自证明什么：
+
+| 模式 | 做了什么 | 证明的事 |
+|---|---|---|
+| `--restart` | `kubectl rollout restart` | 「换 Pod」这个动作本身不中断（走的是和换镜像完全相同的 RollingUpdate 路径） |
+| 默认 | `k3s ctr images tag` 造新 tag → `set image` | 「换版本」不中断。本地已有镜像层，`IfNotPresent` 不会去 registry 拉，所以不需要联网、不需要 build |
+| `--bad` | 发一个拉不到的 tag | 「坏版本发不出去」——新 Pod 起不来时旧 Pod 一个都不会被删，这正是 `maxUnavailable: 0` 唯一能挡住的事故 |
+
+脚本自己在后台起 `rollout-watch.sh`（100ms 一次持续打压），滚完自动停采样、解析汇总、给结论，退出码 0 = 通过。
+
+**判据**：
+
+```
+✓ 通过：812 次请求全部 200，滚动更新期间服务无中断
+```
+
+失败时会打出失败明细（前 10 条），并用 `✗ 未通过` + 退出码 1 结束。
+
+> 为什么不看 `kubectl rollout status` 就下结论：它只说明「Pod 都就绪了」，
+> 期间掉 3 个请求它照样 Success。必须有外部持续打压才能下判断。
+
+> 默认模式结束后，线上跑的是本地测试 tag（形如 `vtest-20261023-103000`），
+> 它不在任何 registry 上。要恢复原版本，脚本末尾会打印现成的 `kubectl set image` 命令。
+> `app.yml` 里的 image 没动，下次 apply 会自动退回原镜像。
 
 ---
 
